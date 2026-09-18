@@ -13,6 +13,7 @@ from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Requ
 
 import truststore
 
+from . import __version__
 from .config import Config
 
 HOST = "fgiscs.minstroyrf.ru"
@@ -118,7 +119,7 @@ class Network:
                         url,
                         headers={
                             "Accept": "*/*" if file else "application/json",
-                            "User-Agent": "fgis-mcp/0.1",
+                            "User-Agent": f"fgis-mcp/{__version__}",
                         },
                     )
                     deadline = time.monotonic() + timeout

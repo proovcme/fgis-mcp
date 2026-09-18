@@ -23,9 +23,15 @@ def test_stdio_discovery_and_offline_call(tmp_path, mode):
         )
         async with Client(params, mode=mode) as client:
             listed = await client.list_tools()
-            assert {"fgis_sources", "fgis_start_download", "fgis_query_dataset"}.issubset(
-                {t.name for t in listed.tools}
-            )
+            assert {
+                "fgis_sources",
+                "fgis_start_download",
+                "fgis_query_dataset",
+                "fgis_read_document",
+                "fgis_search_document",
+                "fgis_document_outline",
+                "fgis_read_document_table",
+            }.issubset({t.name for t in listed.tools})
             result = await client.call_tool("fgis_list_datasets", {})
             assert not result.is_error
             assert json.loads(result.content[0].text)["items"] == []
@@ -33,6 +39,49 @@ def test_stdio_discovery_and_offline_call(tmp_path, mode):
             assert resource.contents
             bad = await client.call_tool("fgis_dataset_info", {"dataset_id": "../outside"})
             assert bad.is_error
+
+    asyncio.run(run())
+
+
+def test_online_document_calls_over_mcp_without_dataset(config, monkeypatch):
+    import hashlib
+
+    from fgis_mcp.server import create_server
+
+    class Network:
+        def __init__(self, config):
+            pass
+
+        def get_value(self, path, *, large=False):
+            payload = {
+                "name": "Тест",
+                "fullPublishedText": "<p>Коэффициент</p><table><tr><td>1,15</td></tr></table>",
+            }
+            raw = json.dumps(payload).encode()
+            return (
+                payload,
+                raw,
+                {"sha256": hashlib.sha256(raw).hexdigest(), "source_url": "https://example.invalid"},
+            )
+
+    monkeypatch.setattr("fgis_mcp.service.Network", Network)
+
+    async def run():
+        async with Client(create_server(config)) as client:
+            args = {"document_guid": "11111111-1111-4111-8111-111111111111"}
+            read = await client.call_tool("fgis_read_document", args)
+            assert not read.is_error
+            doc = json.loads(read.content[0].text)
+            args["expected_sha256"] = doc["provenance"]["sha256"]
+            for name, extra in [
+                ("fgis_search_document", {"query": "коэффициент"}),
+                ("fgis_document_outline", {}),
+                ("fgis_read_document_table", {"table_index": 0}),
+            ]:
+                result = await client.call_tool(name, args | extra)
+                assert not result.is_error
+                assert json.loads(result.content[0].text)["cache_hit"]
+            assert list(config.root.iterdir()) == []
 
     asyncio.run(run())
 

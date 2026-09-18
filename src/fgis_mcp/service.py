@@ -3,6 +3,7 @@ import json
 from filelock import FileLock, Timeout
 
 from . import jobs
+from .documents import OnlineDocuments
 from .network import Network
 from .normalize import norm_cards
 from .storage import Dataset, now
@@ -23,6 +24,7 @@ class Service:
     def __init__(self, config):
         self.config = config
         self.network = Network(config)
+        self.documents = OnlineDocuments(self.network)
 
     def catalog(self, kind="regions", parent_id=None):
         if kind == "regions":

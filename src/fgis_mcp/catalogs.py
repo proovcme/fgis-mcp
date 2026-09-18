@@ -39,6 +39,29 @@ def document_tasks(source, value):
     return [{"kind": kind, "source": source, "guid": guid(value)} for kind in ("document", "file")]
 
 
+def document_refs(row, source):
+    """References accepted by the online document tools, distinct from catalogue-node GUIDs."""
+    candidates = [row.get("normLegalDocPublishedGuid"), row.get("documentLinkGuid"), row.get("frsnDocGuid")]
+    has_document = any(value and str(value) != "00000000-0000-0000-0000-000000000000" for value in candidates)
+    if not has_document and (row.get("filePath") or source in PIR):
+        candidates.append(row.get("guid"))
+    refs = []
+    for value in candidates:
+        if value and str(value) != "00000000-0000-0000-0000-000000000000":
+            ref = {"source": "normative", "document_guid": guid(value)}
+            if ref not in refs:
+                refs.append(ref)
+    if row.get("approvingActGuid") and str(row["approvingActGuid"]) != "00000000-0000-0000-0000-000000000000":
+        refs.append(
+            {
+                "source": "normative",
+                "document_guid": guid(row["approvingActGuid"]),
+                "relation": "approving_act",
+            }
+        )
+    return refs
+
+
 RESOURCE_TREES = {
     "fsbc_materials": "FsbcMaterials",
     "fsbc_machines": "FsbcMachines",
@@ -325,12 +348,14 @@ def browse(
     # Large norm/resource JSON remains accessible via download and document tools.
     summaries = [
         {k: v for k, v in row.items() if not k.endswith("Json") and k != "fullPublishedText"}
+        | {"document_refs": document_refs(row, source)}
         if isinstance(row, dict)
         else row
         for row in rows
     ]
     return paginate(summaries, limit, offset) | {
         "source": source,
+        "document_refs": [{"source": source}] if source in {"fssc", "fsem"} else [],
         "provenance": meta,
         "upstream_total": payload.get("totalCount") if isinstance(payload, dict) else None,
     }
