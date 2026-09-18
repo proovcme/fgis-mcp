@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "fgis": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/proovcme/fgis-mcp.git",
+        "fgis-mcp"
+      ],
+      "env": {
+        "FGIS_NETWORK": "direct"
+      },
+      "type": "stdio"
+    }
+  }
+}
