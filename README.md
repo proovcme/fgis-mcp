@@ -8,7 +8,7 @@
 
 Независимый MCP-сервер для публичной части [ФГИС ЦС](https://fgiscs.minstroyrf.ru/). Позволяет ИИ находить нормы, читать сборники и технические части, искать условия применения коэффициентов и собирать локальные датасеты с первоисточниками.
 
-**Qwen Code · Claude Desktop · Cursor · VS Code · LM Studio · другие MCP-клиенты**
+**Codex · Qwen Code · Claude Desktop · Cursor · VS Code · LM Studio · другие MCP-клиенты**
 
 [Подключение](docs/CLIENTS.md) · [Онлайн-инструменты](docs/ONLINE.md) · [Покрытие](docs/COVERAGE.md) · [Проверки](docs/VERIFICATION.md)
 
@@ -26,6 +26,16 @@
 ## Подключить за минуту
 
 Нужны [uv](https://docs.astral.sh/uv/getting-started/installation/) и Git. Используется Python 3.11+; uv может установить его автоматически.
+
+### Codex
+
+```sh
+codex mcp add fgis -- uvx --from git+https://github.com/proovcme/fgis-mcp.git fgis-mcp
+```
+
+Перезапустите клиент после добавления. Проверьте запись через `codex mcp list`, подключение и инструменты — через `/mcp` в Codex. Для ручной настройки есть [готовый config.toml](examples/codex.config.toml) и [инструкция для Codex](docs/CLIENTS.md#codex).
+
+### Qwen Code и клиенты с mcpServers
 
 Добавьте сервер в конфигурацию MCP-клиента. Для **Qwen Code** это `~/.qwen/settings.json`:
 

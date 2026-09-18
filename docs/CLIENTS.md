@@ -2,6 +2,33 @@
 
 Основной транспорт — **stdio**: ИИ-клиент запускает `uvx` как локальный процесс. Учётная запись ФГИС, HTTP-порт и токен для этого не нужны. Доступ к публичной части ФГИС должен работать с компьютера, на котором запущен MCP.
 
+## Codex
+
+Самый короткий способ через Codex CLI:
+
+```sh
+codex mcp add fgis -- uvx --from git+https://github.com/proovcme/fgis-mcp.git fgis-mcp
+codex mcp list
+```
+
+Либо добавьте в `~/.codex/config.toml` [готовый фрагмент](../examples/codex.config.toml):
+
+```toml
+[mcp_servers.fgis]
+command = "uvx"
+args = ["--from", "git+https://github.com/proovcme/fgis-mcp.git", "fgis-mcp"]
+startup_timeout_sec = 120
+tool_timeout_sec = 240
+```
+
+`startup_timeout_sec` даёт uv время на первую установку; `tool_timeout_sec` оставляет время на крупные документы ФГИС. При настройке командой CLI эти увеличенные таймауты добавьте в созданную секцию при необходимости. Если `uvx` не найден, замените `command` абсолютным путём.
+
+Конфигурация общая для локальных клиентов Codex на одном хосте: CLI, расширения IDE и настольного приложения. Для доверенного проекта можно использовать `.codex/config.toml`. После изменения перезапустите клиент; `/mcp` показывает подключённые серверы и инструменты, тогда как `codex mcp list` проверяет наличие конфигурации.
+
+В интерфейсе настольного приложения также можно открыть Settings → MCP servers → Add server, выбрать STDIO, указать команду `uvx` и аргументы из примера. Сохраните и перезапустите подключение. OAuth для этого локального сервера не нужен.
+
+Синтаксис проверен по `codex mcp add --help` установленного CLI и [официальной документации OpenAI](https://learn.chatgpt.com/docs/extend/mcp?surface=cli). Это настройка локального Codex; ChatGPT в браузере не читает этот файл.
+
 ## Qwen Code, Claude Desktop и LM Studio
 
 Используйте [готовую конфигурацию mcpServers](../examples/stdio.mcp.json), объединив её с существующими настройками.
