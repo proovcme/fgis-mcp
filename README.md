@@ -35,6 +35,18 @@
 
 ---
 
+## Правила работы агента с FGIS MCP
+
+1. **Search first**: перед утверждением о существовании нормы выполнить поиск через MCP (`fgis_search_norms`).
+2. **Read the selected norm before describing it**: перед утверждением о составе работ или ресурсах прочитать норму через `fgis_read_norm`.
+3. **Read official documents before normative conclusions**: перед цитированием методик, техчастей или коэффициентов прочитать первоисточник через `fgis_read_document` / `fgis_search_document` / `fgis_extract_coefficients`.
+4. **Use provenance/evidence from tool results**: опираться на доказательства из блока `evidence` в ответе MCP.
+5. **Do not invent facts absent from MCP results**: запрещено придумывать шифры, ресурсы, коэффициенты и пункты. При отсутствии доказательств возвращать `UNSUPPORTED_BY_FGIS_MCP`.
+6. **Treat candidates as candidates, not exact matches**: совпадение отдельных слов помечается `match_status = candidate` и не доказывает применимость нормы.
+7. **Distinguish local dataset gaps from absence in FGIS**: неполнота локального датасета (`LOCAL_DATASET_INCOMPLETE`) не означает отсутствие данных во всей ФГИС ЦС.
+
+---
+
 ## Что спросить у ИИ
 
 **Нормы и сравнение редакций**

@@ -7,6 +7,8 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .errors import AmbiguousSnapshotError, SnapshotNotFoundError
+
 
 def now():
     return datetime.now(timezone.utc).isoformat()
@@ -105,7 +107,7 @@ def resolve_snapshot_ref(
         return rows[0][0]
     elif len(rows) > 1:
         uids = [r[0] for r in rows]
-        raise ValueError(f"AMBIGUOUS_SNAPSHOT: Reference '{ref_str}' matches multiple snapshots: {uids}")
+        raise AmbiguousSnapshotError(f"Reference '{ref_str}' matches multiple snapshots: {uids}")
     else:
         if not include_incomplete:
             inc_rows = conn.execute(
@@ -130,11 +132,11 @@ def resolve_snapshot_ref(
         if len(norm_uids) == 1:
             return norm_uids[0]
         elif len(norm_uids) > 1:
-            raise ValueError(
-                f"AMBIGUOUS_SNAPSHOT: Reference '{ref_str}' matches multiple norms snapshots: {norm_uids}"
+            raise AmbiguousSnapshotError(
+                f"Reference '{ref_str}' matches multiple norms snapshots: {norm_uids}"
             )
 
-        raise ValueError(f"SNAPSHOT_NOT_FOUND: No snapshot found for reference '{ref_str}'")
+        raise SnapshotNotFoundError(f"No snapshot found for reference '{ref_str}'")
 
 
 class Dataset:
@@ -738,13 +740,47 @@ class Dataset:
         items = [json.loads(row[0]) for row in rows]
         if kind == "documents":
             items = [{k: v for k, v in item.items() if k != "data"} for item in items]
-        return {
+        res = {
             "dataset_id": self.id,
             "total": total,
             "offset": offset,
             "next_offset": offset + limit if offset + limit < total else None,
             "items": items,
         }
+        if kind == "norms":
+            q_clean = (query or "").strip().casefold()
+            code_clean = (code or "").strip().casefold()
+            for it in items:
+                it_code = it.get("code", "").strip().casefold()
+                it_name = it.get("name", "").strip().casefold()
+                if (code_clean and it_code == code_clean) or (
+                    q_clean and (it_code == q_clean or it_name == q_clean)
+                ):
+                    it["match_status"] = "exact"
+                else:
+                    it["match_status"] = "candidate"
+
+            if total == 0:
+                match_status = "not_found"
+                msg = "Прямая норма ФСНБ через FGIS MCP не подтверждена"
+            elif any(it.get("match_status") == "exact" for it in items):
+                match_status = (
+                    "exact"
+                    if code_clean or any(it.get("code", "").strip().casefold() == q_clean for it in items)
+                    else "candidate"
+                )
+                msg = (
+                    "Найдено точное совпадение нормы" if match_status == "exact" else "Найдены кандидаты норм"
+                )
+            else:
+                match_status = "candidate"
+                msg = (
+                    "Найдены кандидаты норм (требуется проверка применимости и чтение состава работ/ресурсов)"
+                )
+
+            res["match_status"] = match_status
+            res["message"] = msg
+        return res
 
     def norm_history(self, code: str, family: str | None = None, include_incomplete: bool = False) -> dict:
         """Retrieve all historical editions of a norm across all imported snapshots with transition diffs."""
@@ -773,15 +809,6 @@ class Dataset:
 
         with self.connect() as conn:
             rows = conn.execute(query, params).fetchall()
-        if not rows:
-            return {
-                "dataset_id": self.id,
-                "code": code,
-                "family": family,
-                "total_editions": 0,
-                "editions": [],
-                "transitions": [],
-            }
         records = []
         for r in rows:
             card = json.loads(r[0])
@@ -857,10 +884,35 @@ class Dataset:
             for i in range(len(family_editions) - 1):
                 all_transitions.append(compare_norm_editions(family_editions[i], family_editions[i + 1]))
 
+        if not records:
+            snapshots = self.list_snapshots(include_incomplete=include_incomplete)
+            with self.connect() as conn:
+                total_norms = conn.execute("SELECT count(*) FROM norms").fetchone()[0]
+            status = "LOCAL_DATASET_INCOMPLETE" if snapshots else "SOURCE_NOT_IMPORTED"
+            return {
+                "dataset_id": self.id,
+                "code": code,
+                "family": family,
+                "status": status,
+                "error_code": status,
+                "message": (
+                    f"Norm '{code}' not found in imported snapshots of local dataset. "
+                    f"Local dataset contains {len(snapshots)} snapshots ({total_norms} total norms). "
+                    "Absence in local dataset does NOT mean the norm does not exist in FGIS CS. "
+                    "You can search online using fgis_search_norms or import additional snapshots."
+                ),
+                "families_found": [],
+                "total_editions": 0,
+                "editions": [],
+                "transitions": [],
+                "available_snapshots": [s.get("snapshot_id") or s.get("snapshot_uid") for s in snapshots],
+            }
+
         return {
             "dataset_id": self.id,
             "code": code,
             "family": family,
+            "status": "complete",
             "families_found": list(by_family.keys()),
             "total_editions": len(records),
             "editions": records,
@@ -1052,12 +1104,42 @@ class Dataset:
                     "provenance": p.get("provenance"),
                 }
             )
+        total_recs = len(base_records) + len(records)
+        with self.connect() as conn:
+            available_periods = [
+                r[0]
+                for r in conn.execute(
+                    "SELECT DISTINCT period_id FROM prices WHERE period_id > 0 ORDER BY period_id"
+                ).fetchall()
+            ]
+            total_prices = conn.execute("SELECT count(*) FROM prices").fetchone()[0]
+            total_fsbc = conn.execute("SELECT count(*) FROM fsbc").fetchone()[0]
+
+        if total_recs == 0:
+            status = (
+                "LOCAL_DATASET_INCOMPLETE" if (total_prices > 0 or total_fsbc > 0) else "SOURCE_NOT_IMPORTED"
+            )
+            message = (
+                f"Resource price for code '{code}' not found in local dataset. "
+                f"Local dataset contains {len(available_periods)} quarterly price periods ({total_prices} records) and {total_fsbc} base FSBC items. "
+                "Absence in local dataset does NOT prove absence in FGIS CS. "
+                "Additional periods or resources can be imported from FGIS CS via fgis_start_download or OpenData."
+            )
+        else:
+            status = "complete"
+            message = f"Found {total_recs} price records for resource '{code}'"
+
         return {
             "dataset_id": self.id,
             "code": code,
+            "status": status,
+            "error_code": status if total_recs == 0 else None,
+            "message": message,
+            "available_periods": available_periods,
+            "fgis_source_available": True,
             "base_records": base_records,
             "quarterly_records": records,
-            "total_records": len(base_records) + len(records),
+            "total_records": total_recs,
             "records": base_records + records,
         }
 
