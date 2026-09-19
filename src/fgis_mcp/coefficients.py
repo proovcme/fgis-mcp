@@ -16,12 +16,17 @@ COEFF_HEADER_PATTERNS = [
 ]
 
 CONDITION_HEADER_PATTERNS = [
-    r"условия",
+    r"услови",
     r"фактор",
-    r"наименование",
+    r"наименовани",
     r"производств",
     r"характеристик",
     r"описание работ",
+    r"шифр таблиц",
+    r"шифр норм",
+    r"температур",
+    r"категори",
+    r"должност",
 ]
 
 NOTE_HEADER_PATTERNS = [
@@ -46,7 +51,9 @@ def is_coefficient_table(table: dict[str, Any]) -> bool:
 
     combined_text = " ".join(header_sample)
     has_coeff = any(re.search(pat, combined_text) for pat in COEFF_HEADER_PATTERNS)
-    has_condition = any(re.search(pat, combined_text) for pat in CONDITION_HEADER_PATTERNS)
+    has_condition = (
+        any(re.search(pat, combined_text) for pat in CONDITION_HEADER_PATTERNS) or len(rows[0]) >= 2
+    )
     return has_coeff and has_condition
 
 
@@ -74,7 +81,7 @@ def extract_coefficients_from_table(
                 mapping[col_idx] = "condition"
             elif any(re.search(pat, text) for pat in NOTE_HEADER_PATTERNS) and col_idx not in mapping:
                 mapping[col_idx] = "note"
-        if "coeff" in mapping.values() and "condition" in mapping.values():
+        if "coeff" in mapping.values():
             header_row_idx = r_idx
             break
 
@@ -83,6 +90,13 @@ def extract_coefficients_from_table(
 
     coeff_col = next(k for k, v in mapping.items() if v == "coeff")
     condition_col = next((k for k, v in mapping.items() if v == "condition"), None)
+    if condition_col is None:
+        # Pick the first non-coeff, non-note column as condition column
+        for col_idx in range(len(rows[0])):
+            if col_idx != coeff_col and mapping.get(col_idx) != "note":
+                condition_col = col_idx
+                break
+
     note_col = next((k for k, v in mapping.items() if v == "note"), None)
 
     results = []
@@ -93,6 +107,15 @@ def extract_coefficients_from_table(
         row = rows[r_idx]
         if not row:
             continue
+
+        raw_row_texts = [clean(c.get("text", "")) for c in row]
+
+        # Skip numbering rows (e.g. ['1', '2', '3', '4', '5'])
+        digits_only = [t for t in raw_row_texts if t]
+        if len(digits_only) >= 2 and all(t.isdigit() and int(t) < 50 for t in digits_only):
+            nums = [int(t) for t in digits_only]
+            if nums == list(range(nums[0], nums[0] + len(nums))):
+                continue
 
         raw_coeff_cell = row[coeff_col] if coeff_col < len(row) else None
         raw_cond_cell = row[condition_col] if condition_col is not None and condition_col < len(row) else None
@@ -110,7 +133,7 @@ def extract_coefficients_from_table(
         status = "extracted"
 
         # If condition or coefficient is absent or non-numeric/ambiguous, classify as unresolved
-        if coeff_val is None or not condition_text:
+        if coeff_val is None or not condition_text or coeff_text in {"—", "-", "–"}:
             status = "unresolved"
 
         offset = raw_coeff_cell.get("offset") if raw_coeff_cell else table.get("offset", 0)
@@ -124,6 +147,7 @@ def extract_coefficients_from_table(
             "coefficient_raw": coeff_text,
             "condition_text": condition_text,
             "note_text": note_text,
+            "raw_row": raw_row_texts,
             "surrounding_text": context_before,
             "source_offset": offset,
             "source_sha256": provenance.get("sha256"),

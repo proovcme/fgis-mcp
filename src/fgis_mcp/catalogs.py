@@ -196,8 +196,13 @@ def request(task):
             return "EstimatedPrice/PriceZones", {"subjectId": task["region_id"]}
         return "EstimatedPrice/CountrySubjects", {}
     if source == "opendata":
+        import urllib.parse
+
+        from .opendata import resolve_dataset_number
+
         num = task.get("dataset_number", "7707082071-fsnb")
-        return "OpenData/GetByNumber/" + str(num), {}
+        resolved = resolve_dataset_number(str(num))
+        return "OpenData/GetByNumber/" + urllib.parse.quote(resolved), {}
     raise ValueError("Unsupported source")
 
 

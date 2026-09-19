@@ -70,3 +70,61 @@ def test_evaluate_coverage_bounded_uncompleted():
     res = evaluate_coverage(tasks, receipts, errors)
     assert not res["all_requested_tasks_succeeded"]
     assert res["sources"]["fsnb2022"]["proof"] == PROOF_BOUNDED
+    assert res["verification_proof"] == PROOF_BOUNDED
+
+
+def test_invariants_bounded_never_turns_into_complete():
+    # 5 tasks discovered, only 2 succeeded, 0 errors (max_tasks limit hit)
+    tasks = [{"kind": "catalog", "source": "fsnb2022", "i": i} for i in range(5)]
+    receipts = [{"request": tasks[i], "records": 10} for i in range(2)]
+    errors = []
+
+    res = evaluate_coverage(tasks, receipts, errors)
+    assert res["verification_proof"] == PROOF_BOUNDED
+    assert res["verification_proof"] != PROOF_COMPLETE_VERIFIED
+    assert res["verification_proof"] != "complete_unverified"
+
+
+def test_invariants_error_never_turns_into_empty():
+    tasks = [{"kind": "catalog", "source": "fsnb2022", "parent": "11111111-1111-4111-8111-111111111111"}]
+    receipts = []
+    errors = [{"task": tasks[0], "code": "TIMEOUT", "message": "Gateway timeout"}]
+
+    res = evaluate_coverage(tasks, receipts, errors)
+    assert res["total_failed_tasks"] == 1
+    assert res["verification_proof"] == PROOF_PARTIAL
+    assert res["verification_proof"] != "unknown"
+
+
+def test_invariants_empty_never_turns_into_complete():
+    # Empty task list must never yield complete
+    res = evaluate_coverage([], [], [])
+    assert not res["all_requested_tasks_succeeded"]
+    assert res["verification_proof"] != PROOF_COMPLETE_VERIFIED
+    assert res["verification_proof"] != "complete_unverified"
+
+
+def test_invariants_totalcount_with_duplicates_never_verified():
+    from fgis_mcp.coverage import verify_collection_completeness
+
+    # reported_total: 100, received_items: 100, but with a duplicate item id
+    items_with_duplicate = [{"id": i} for i in range(99)] + [{"id": 0}]  # 100 items, id 0 duplicated
+    assert len(items_with_duplicate) == 100
+
+    proof_res = verify_collection_completeness(
+        reported_total=100,
+        received_items=items_with_duplicate,
+    )
+    assert not proof_res["is_complete_verified"]
+    assert proof_res["proof"] == PROOF_PARTIAL
+    assert proof_res["has_duplicates"]
+    assert proof_res["duplicate_ids"] == ["0"]
+
+    # Without duplicates, it should be complete_verified
+    unique_items = [{"id": i} for i in range(100)]
+    proof_clean = verify_collection_completeness(
+        reported_total=100,
+        received_items=unique_items,
+    )
+    assert proof_clean["is_complete_verified"]
+    assert proof_clean["proof"] == PROOF_COMPLETE_VERIFIED

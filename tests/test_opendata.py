@@ -92,3 +92,80 @@ def test_known_opendata_catalog():
     known = list_known_opendata()
     assert len(known) == len(KNOWN_OPENDATA_DATASETS)
     assert any("7707082071-fsnb" in k["dataset_number"] for k in known)
+
+
+def test_portal_schema_normalization():
+    portal_raw = {
+        "identificationNumber": " 7707082071-fsnb",
+        "datasetName": "ФСНБ-2022",
+        "datasetDescription": "База сметных нормативов",
+        "owner": "ФАУ Главгосэкспертиза России",
+        "firstPublicationDate": "2022-05-18T12:00:00+03:00",
+        "lastChangeDate": "2026-08-12T14:51:00+03:00",
+        "guidelineVersion": "2026.3",
+        "termsOfUse": "https://data.gov.ru/normative_base",
+        "datasetFile": {
+            "path": "7f4f249c-9781-495c-9976-e795e0e8ed4e",
+            "name": "data-20260812-structure-20240216.zip",
+        },
+        "datasetVersionFiles": [
+            {
+                "path": "6080dd72-8651-4853-aa3d-9bee37074d2d",
+                "name": "data-20221026-structure-20220518.zip",
+            }
+        ],
+    }
+
+    norm = normalize_passport(portal_raw, "7707082071-fsnb")
+    assert norm["dataset_id"] == "7707082071-fsnb"
+    assert norm["title"] == "ФСНБ-2022"
+    assert norm["owner"] == "ФАУ Главгосэкспертиза России"
+    assert norm["version"] == "2026.3"
+    assert len(norm["files"]) == 2
+    assert norm["files"][0]["format"] == "ZIP"
+    assert "values/GetFileContent/7f4f249c-9781-495c-9976-e795e0e8ed4e" in norm["files"][0]["source_url"]
+    assert "values/GetFileContent/6080dd72-8651-4853-aa3d-9bee37074d2d" in norm["files"][1]["source_url"]
+
+
+def test_cross_check_set_comparison():
+    od_data = [
+        {"id": "01", "name": "Земляные работы", "unit": "1000 м3"},
+        {"id": "02", "name": "Горновскрышные работы", "unit": "1000 м3"},
+        {"id": "03", "name": "Буровзрывные работы", "unit": "м3"},
+    ]
+    api_data = [
+        {"id": "02", "name": "Горновскрышные работы", "unit": "1000 м3"},
+        {"id": "03", "name": "Буровзрывные работы (изм)", "unit": "100 м3"},
+        {"id": "04", "name": "Скважины", "unit": "м"},
+    ]
+
+    res = cross_check_opendata_with_api(od_data, api_data)
+    assert res["opendata_ids"] == ["01", "02", "03"]
+    assert res["api_ids"] == ["02", "03", "04"]
+    assert res["intersection"] == ["02", "03"]
+    assert res["only_in_opendata"] == ["01"]
+    assert res["only_in_api"] == ["04"]
+    assert res["duplicates"] == []
+    assert len(res["same_id_different_metadata"]) == 1
+    assert res["same_id_different_metadata"][0]["id"] == "03"
+    assert "unit" in res["same_id_different_metadata"][0]["differences"]
+
+
+def test_fetch_passport_space_fallback():
+    from fgis_mcp.network import SourceError
+
+    class FallbackNetwork:
+        def get_value(self, path, *, large=False):
+            if path == "OpenData/GetByNumber/7707082071-fsnb":
+                raise SourceError("HTTP_ERROR", "Not Found", status=404)
+            if path == "OpenData/GetByNumber/%207707082071-fsnb":
+                return (
+                    {"identificationNumber": " 7707082071-fsnb", "datasetName": "ФСНБ-2022"},
+                    b"{}",
+                    {"source_url": "https://fgiscs.minstroyrf.ru/api/" + path, "sha256": "123"},
+                )
+            raise AssertionError(f"Unexpected path: {path}")
+
+    passport, _, meta = fetch_passport(FallbackNetwork(), "7707082071-fsnb")
+    assert passport["title"] == "ФСНБ-2022"
+    assert "%207707082071-fsnb" in meta["source_url"]

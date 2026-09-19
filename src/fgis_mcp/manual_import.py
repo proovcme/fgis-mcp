@@ -69,10 +69,13 @@ def import_manual_file(
             parsed = json.loads(body.decode("utf-8"))
             if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
                 if any("normTableJson" in r for r in parsed):
-                    cards = norm_cards(parsed)
-                    data.add_norms(task_key, cards, receipt)
-                    imported_type = "norms"
-                    imported_count = len(cards)
+                    try:
+                        cards = norm_cards(parsed)
+                        data.add_norms(task_key, cards, receipt)
+                        imported_type = "norms"
+                        imported_count = len(cards)
+                    except Exception:
+                        pass
             if imported_type == "unknown":
                 data.add_document(task_key, parsed, receipt)
                 imported_type = "document_json"

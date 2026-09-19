@@ -249,6 +249,8 @@ def evaluate_coverage(
             entry["received_upstream_items"] += records
 
     # Calculate verification proof for each source
+    has_bounded = False
+    has_failed = False
     for source, entry in by_source.items():
         disc = entry["discovered_tasks"]
         succ = entry["succeeded_tasks"]
@@ -256,6 +258,10 @@ def evaluate_coverage(
 
         if fails > 0:
             entry["proof"] = PROOF_PARTIAL
+            has_failed = True
+        elif succ < disc:
+            entry["proof"] = PROOF_BOUNDED
+            has_bounded = True
         elif disc == succ and disc > 0:
             # If capabilities have a verified claim or totalCount matched
             cap = CAPABILITIES.get(source)
@@ -263,25 +269,85 @@ def evaluate_coverage(
                 entry["proof"] = PROOF_COMPLETE_VERIFIED
             else:
                 entry["proof"] = PROOF_COMPLETE_UNVERIFIED
-        elif succ < disc:
-            entry["proof"] = PROOF_BOUNDED
         else:
             entry["proof"] = PROOF_UNKNOWN
 
-    all_verified = (
-        all(e["proof"] in {PROOF_COMPLETE_VERIFIED, PROOF_COMPLETE_UNVERIFIED} for e in by_source.values())
-        and not errors
-    )
+    if not tasks:
+        overall_proof = PROOF_UNKNOWN
+    elif errors or has_failed:
+        overall_proof = PROOF_PARTIAL
+    elif has_bounded:
+        overall_proof = PROOF_BOUNDED
+    elif all(e["proof"] == PROOF_COMPLETE_VERIFIED for e in by_source.values()):
+        overall_proof = PROOF_COMPLETE_VERIFIED
+    elif all(e["proof"] in {PROOF_COMPLETE_VERIFIED, PROOF_COMPLETE_UNVERIFIED} for e in by_source.values()):
+        overall_proof = PROOF_COMPLETE_UNVERIFIED
+    else:
+        overall_proof = PROOF_UNKNOWN
 
     return {
         "sources": by_source,
         "total_discovered_tasks": len(tasks),
         "total_succeeded_tasks": len(done_set),
         "total_failed_tasks": len(errors),
-        "all_requested_tasks_succeeded": len(done_set) == len(tasks) and not errors,
-        "verification_proof": PROOF_COMPLETE_VERIFIED
-        if all_verified
-        else PROOF_PARTIAL
-        if errors
-        else PROOF_COMPLETE_UNVERIFIED,
+        "all_requested_tasks_succeeded": len(done_set) == len(tasks) and not errors and len(tasks) > 0,
+        "verification_proof": overall_proof,
+    }
+
+
+def verify_collection_completeness(
+    reported_total: int,
+    received_items: list[Any],
+    id_key: str = "id",
+) -> dict[str, Any]:
+    """Verify completeness of an upstream collection using set-based proof.
+
+    Guarantees:
+    - totalCount == len(received_items) with duplicates NEVER yields complete_verified.
+    - reported_total == 0 yields unknown/empty, NEVER complete_verified.
+    - bounded count yields bounded, NEVER complete.
+    """
+    total_received = len(received_items)
+    ids = []
+    for item in received_items:
+        if isinstance(item, dict):
+            val = (
+                item.get(id_key)
+                if item.get(id_key) is not None
+                else (item.get("code") if item.get("code") is not None else item.get("guid"))
+            )
+            ids.append(str(val) if val is not None else None)
+        else:
+            ids.append(str(item))
+
+    seen = set()
+    duplicates = []
+    for x in ids:
+        if x is not None and x in seen and x not in duplicates:
+            duplicates.append(x)
+        seen.add(x)
+
+    unique_count = len(seen)
+    has_duplicates = len(duplicates) > 0 or unique_count < total_received
+
+    if reported_total == 0 and total_received == 0:
+        proof = PROOF_UNKNOWN
+    elif has_duplicates:
+        # Crucial invariant: count matching reported_total with duplicates is NOT complete_verified
+        proof = PROOF_PARTIAL
+    elif total_received == reported_total and unique_count == reported_total:
+        proof = PROOF_COMPLETE_VERIFIED
+    elif total_received < reported_total:
+        proof = PROOF_BOUNDED
+    else:
+        proof = PROOF_PARTIAL
+
+    return {
+        "reported_total": reported_total,
+        "received_count": total_received,
+        "unique_ids_count": unique_count,
+        "duplicate_ids": duplicates,
+        "has_duplicates": has_duplicates,
+        "proof": proof,
+        "is_complete_verified": proof == PROOF_COMPLETE_VERIFIED,
     }
