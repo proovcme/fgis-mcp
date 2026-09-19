@@ -219,16 +219,57 @@ def execute(config, job_id, network=None):
                                 is_fsnb_zip = suffix == "zip" or body.startswith(b"PK\x03\x04")
                                 if is_fsnb_zip:
                                     zip_path = data.path / raw_rel
+                                    archive_sha = meta["sha256"]
+                                    dist_guid = task.get("guid") or task.get("distribution_guid")
                                     snapshot_id = task.get("snapshot_id") or opendata_xml.extract_snapshot_id(
                                         task.get("name", "") or file_url
                                     )
-                                    reader = opendata_xml.FsnbArchiveReader(zip_path, snapshot_id=snapshot_id)
+                                    ds_num = task.get("dataset_number", "7707082071-fsnb")
+
+                                    # Check safe re-import
+                                    with data.connect() as conn:
+                                        existing = conn.execute(
+                                            """SELECT snapshot_uid, snapshot_id, total_norms, total_fsbc, proof
+                                            FROM snapshots
+                                            WHERE (archive_sha256=? OR sha256=?) AND status='complete'""",
+                                            (archive_sha, archive_sha),
+                                        ).fetchone()
+                                        if existing:
+                                            receipt["snapshot_uid"] = existing[0]
+                                            receipt["snapshot_id"] = existing[1]
+                                            receipt["total_norms"] = existing[2]
+                                            receipt["total_fsbc"] = existing[3]
+                                            receipt["proof"] = json.loads(existing[4]) if existing[4] else {}
+                                            data.add_document(
+                                                key,
+                                                {
+                                                    "name": task.get("name")
+                                                    or task.get("dataset_number", "opendata"),
+                                                    "kind": "opendata_archive",
+                                                    "snapshot_uid": existing[0],
+                                                    "snapshot_id": existing[1],
+                                                },
+                                                receipt,
+                                            )
+                                            continue
+
+                                    reader = opendata_xml.FsnbArchiveReader(
+                                        zip_path,
+                                        snapshot_id=snapshot_id,
+                                        distribution_guid=dist_guid,
+                                        dataset_number=ds_num,
+                                        archive_sha256=archive_sha,
+                                    )
+                                    snap_uid = reader.snapshot_uid
                                     snapshot_meta = {
+                                        "snapshot_uid": snap_uid,
                                         "snapshot_id": snapshot_id,
-                                        "dataset_number": task.get("dataset_number", "7707082071-fsnb"),
+                                        "dataset_number": ds_num,
+                                        "distribution_guid": dist_guid,
+                                        "archive_sha256": archive_sha,
                                         "file_name": task.get("name", ""),
-                                        "guid": task.get("guid"),
-                                        "sha256": meta["sha256"],
+                                        "guid": dist_guid,
+                                        "sha256": archive_sha,
                                         "archive_size": len(body),
                                         "approval_date": reader.approval_date,
                                         "effective_from": reader.effective_from,
@@ -302,7 +343,7 @@ def execute(config, job_id, network=None):
                                             duplicate_fsbc_ids=duplicate_fsbc_ids,
                                         )
                                         data.finish_snapshot(
-                                            snapshot_id,
+                                            snap_uid,
                                             total_norms=total_norms,
                                             total_fsbc=total_fsbc,
                                             proof=proof,
@@ -310,13 +351,14 @@ def execute(config, job_id, network=None):
                                             approval_date=reader.approval_date,
                                             effective_from=reader.effective_from,
                                         )
+                                        receipt["snapshot_uid"] = snap_uid
                                         receipt["snapshot_id"] = snapshot_id
                                         receipt["total_norms"] = total_norms
                                         receipt["total_fsbc"] = total_fsbc
                                         receipt["xml_inventory"] = reader.inventory
                                         receipt["proof"] = proof
                                     except Exception as exc:
-                                        data.fail_snapshot(snapshot_id, error=str(exc))
+                                        data.fail_snapshot(snap_uid, error=str(exc))
                                         raise
 
                                 data.add_document(

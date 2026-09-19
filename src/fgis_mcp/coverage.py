@@ -312,13 +312,13 @@ def evaluate_coverage(
                     else req.get("kind", "unknown"),
                 )
                 if req_src == source:
-                    if r.get("proof") == PROOF_COMPLETE_VERIFIED or r.get("verified_complete") is True:
-                        has_verified_evidence = True
-                        break
                     if (
-                        r.get("total_count") is not None
-                        and r.get("total_count") == r.get("records")
-                        and r.get("records", 0) > 0
+                        r.get("proof") == PROOF_COMPLETE_VERIFIED
+                        or r.get("verified_complete") is True
+                        or (
+                            isinstance(r.get("proof"), dict)
+                            and r.get("proof", {}).get("proof") == PROOF_COMPLETE_VERIFIED
+                        )
                     ):
                         has_verified_evidence = True
                         break

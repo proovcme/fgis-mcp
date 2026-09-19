@@ -225,13 +225,16 @@ class Service:
         with data.connect() as conn:
             if not include_incomplete:
                 for snap in (snapshot_a, snapshot_b):
-                    row = conn.execute("SELECT status FROM snapshots WHERE snapshot_id=?", (snap,)).fetchone()
+                    row = conn.execute(
+                        "SELECT status FROM snapshots WHERE snapshot_uid=? OR snapshot_id=? ORDER BY (status = 'complete') DESC",
+                        (snap, snap),
+                    ).fetchone()
                     if row and row[0] != "complete":
                         raise ValueError(f"Snapshot {snap} is not complete (status: {row[0]})")
 
-            query = "SELECT payload FROM norms WHERE norm_id LIKE ?"
-            params_a = [f"{snapshot_a}:%"]
-            params_b = [f"{snapshot_b}:%"]
+            query = "SELECT payload FROM norms WHERE (snapshot_uid=? OR snapshot_id=? OR norm_id LIKE ?)"
+            params_a = [snapshot_a, snapshot_a, f"{snapshot_a}:%"]
+            params_b = [snapshot_b, snapshot_b, f"{snapshot_b}:%"]
             if family:
                 query += " AND family=?"
                 params_a.append(family)
@@ -240,8 +243,14 @@ class Service:
             rows_a = conn.execute(query, params_a).fetchall()
             rows_b = conn.execute(query, params_b).fetchall()
 
-        norms_a = {item["code"]: item for item in (json.loads(r[0]) for r in rows_a)}
-        norms_b = {item["code"]: item for item in (json.loads(r[0]) for r in rows_b)}
+        norms_a = {
+            (item.get("family") or "ГЭСН", item.get("code", "")): item
+            for item in (json.loads(r[0]) for r in rows_a)
+        }
+        norms_b = {
+            (item.get("family") or "ГЭСН", item.get("code", "")): item
+            for item in (json.loads(r[0]) for r in rows_b)
+        }
 
         if not norms_a and not norms_b:
             raise ValueError(
@@ -255,12 +264,13 @@ class Service:
         archive_path: str,
         dataset_id: str | None = None,
         snapshot_id: str | None = None,
+        distribution_guid: str | None = None,
     ):
         import uuid
         from pathlib import Path
 
         from .opendata_xml import FsnbArchiveReader
-        from .storage import now
+        from .storage import now, sha_file
 
         path = Path(archive_path).expanduser().resolve()
         if not path.is_file():
@@ -279,11 +289,45 @@ class Service:
                 Dataset(self.config.root, dataset_id, create=True)
 
         data = Dataset(self.config.root, dataset_id)
-        reader = FsnbArchiveReader(path, snapshot_id=snapshot_id)
-        snap_id = reader.snapshot_id
+
+        # Compute archive SHA-256 first for safe re-import check
+        file_sha256 = sha_file(path)
+
+        # Check if already imported with the same SHA-256 and status == 'complete'
+        with data.connect() as conn:
+            row = conn.execute(
+                """SELECT snapshot_uid, snapshot_id, total_norms, total_fsbc, payload, proof
+                FROM snapshots
+                WHERE (archive_sha256=? OR sha256=?) AND status='complete'""",
+                (file_sha256, file_sha256),
+            ).fetchone()
+            if row:
+                existing_meta = json.loads(row[4]) if row[4] else {}
+                existing_proof = json.loads(row[5]) if row[5] else existing_meta.get("proof")
+                return {
+                    "dataset_id": dataset_id,
+                    "snapshot_uid": row[0],
+                    "snapshot_id": row[1],
+                    "total_norms": row[2],
+                    "total_fsbc": row[3],
+                    "xml_inventory": existing_meta.get("xml_files", {}),
+                    "sha256": file_sha256,
+                    "status": "complete",
+                    "proof": existing_proof,
+                    "reused_existing": True,
+                }
 
         # Copy archive into raw in 1 MiB chunks without loading full file into memory
         raw_rel, h, file_size = data.raw_file(path, "zip")
+
+        reader = FsnbArchiveReader(
+            path,
+            snapshot_id=snapshot_id,
+            distribution_guid=distribution_guid,
+            archive_sha256=h,
+        )
+        snap_id = reader.snapshot_id
+        snap_uid = reader.snapshot_uid
 
         receipt = {
             "source_url": f"file://{path.name}",
@@ -295,14 +339,19 @@ class Service:
                 "source": "opendata",
                 "archive_path": str(path),
                 "snapshot_id": snap_id,
+                "snapshot_uid": snap_uid,
+                "distribution_guid": distribution_guid,
             },
             "raw_file": raw_rel,
             "xml_inventory": reader.inventory,
         }
 
         snapshot_meta = {
+            "snapshot_uid": snap_uid,
             "snapshot_id": snap_id,
             "dataset_number": "7707082071-fsnb",
+            "distribution_guid": distribution_guid,
+            "archive_sha256": h,
             "file_name": path.name,
             "sha256": h,
             "archive_size": file_size,
@@ -330,7 +379,7 @@ class Service:
                 norm_batch.append(norm_card)
                 if len(norm_batch) >= 1000:
                     data.add_norms(
-                        f"opendata:{snap_id}:norms:{total_norms}",
+                        f"opendata:{snap_uid}:norms:{total_norms}",
                         norm_batch,
                         receipt,
                         save_receipt=False,
@@ -339,7 +388,7 @@ class Service:
                     norm_batch = []
             if norm_batch:
                 data.add_norms(
-                    f"opendata:{snap_id}:norms:{total_norms}",
+                    f"opendata:{snap_uid}:norms:{total_norms}",
                     norm_batch,
                     receipt,
                     save_receipt=False,
@@ -357,7 +406,7 @@ class Service:
                 fsbc_batch.append(fsbc_item)
                 if len(fsbc_batch) >= 1000:
                     data.add_fsbc(
-                        f"opendata:{snap_id}:fsbc:{total_fsbc}",
+                        f"opendata:{snap_uid}:fsbc:{total_fsbc}",
                         fsbc_batch,
                         receipt,
                         save_receipt=False,
@@ -366,7 +415,7 @@ class Service:
                     fsbc_batch = []
             if fsbc_batch:
                 data.add_fsbc(
-                    f"opendata:{snap_id}:fsbc:{total_fsbc}",
+                    f"opendata:{snap_uid}:fsbc:{total_fsbc}",
                     fsbc_batch,
                     receipt,
                     save_receipt=False,
@@ -381,7 +430,7 @@ class Service:
             )
             # Mark snapshot complete
             data.finish_snapshot(
-                snap_id,
+                snap_uid,
                 total_norms=total_norms,
                 total_fsbc=total_fsbc,
                 proof=proof,
@@ -390,11 +439,12 @@ class Service:
                 effective_from=reader.effective_from,
             )
         except Exception as exc:
-            data.fail_snapshot(snap_id, error=str(exc))
+            data.fail_snapshot(snap_uid, error=str(exc))
             raise
 
         return {
             "dataset_id": dataset_id,
+            "snapshot_uid": snap_uid,
             "snapshot_id": snap_id,
             "total_norms": total_norms,
             "total_fsbc": total_fsbc,

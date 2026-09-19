@@ -309,3 +309,48 @@ def test_archive_reader_full_flow(tmp_path):
     fsbc = list(reader.iter_fsbc())
     assert len(fsbc) == 1
     assert fsbc[0]["code"] == "01.1.01.01-0002"
+
+
+def test_compare_fsnb_editions_composite_family_code_independence():
+    """Verify that norms with the same code under different families (ГЭСН vs ГЭСНм) participate independently."""
+    v1_norms = {
+        ("ГЭСН", "01-01-001-01"): {
+            "code": "01-01-001-01",
+            "family": "ГЭСН",
+            "name": "Разработка грунта v1",
+            "work_steps": ["Шаг 1"],
+            "resources": [],
+        },
+        ("ГЭСНм", "01-01-001-01"): {
+            "code": "01-01-001-01",
+            "family": "ГЭСНм",
+            "name": "Монтаж v1",
+            "work_steps": ["Шаг A"],
+            "resources": [],
+        },
+    }
+    v2_norms = {
+        ("ГЭСН", "01-01-001-01"): {
+            "code": "01-01-001-01",
+            "family": "ГЭСН",
+            "name": "Разработка грунта v2 (изменено)",
+            "work_steps": ["Шаг 1", "Шаг 2"],
+            "resources": [],
+        },
+        ("ГЭСНм", "01-01-001-01"): {
+            "code": "01-01-001-01",
+            "family": "ГЭСНм",
+            "name": "Монтаж v1",
+            "work_steps": ["Шаг A"],
+            "resources": [],
+        },
+    }
+
+    agg = compare_fsnb_editions(v1_norms, v2_norms, v1_snapshot_id="v1", v2_snapshot_id="v2")
+    assert agg["v1_total_norms"] == 2
+    assert agg["v2_total_norms"] == 2
+    assert agg["added_count"] == 0
+    assert agg["removed_count"] == 0
+    assert agg["modified_count"] == 1
+    assert agg["identical_count"] == 1
+    assert "ГЭСН 01-01-001-01" in agg["modified_codes_sample"]

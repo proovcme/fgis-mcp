@@ -11,6 +11,7 @@ from typing import Any, BinaryIO
 
 from .network import SourceError
 from .normalize import clean, number
+from .storage import build_snapshot_uid
 
 XML_NORM_FAMILIES = {
     "ГЭСН.xml": "ГЭСН",
@@ -153,6 +154,7 @@ def parse_base_xml_stream(
     approval_date_override: str | None = None,
     xml_filename: str | None = None,
     xml_sha256: str | None = None,
+    snapshot_uid: str | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Stream parse a GOSN/GESN base XML file yielding normalized norm cards.
 
@@ -287,8 +289,9 @@ def parse_base_xml_stream(
                 effective_to = extracted_dates["effective_to"]
                 pub_date = creation_date or None
 
+                eff_snap_uid = snapshot_uid or snapshot_id
                 card = {
-                    "norm_id": f"{snapshot_id}:{eff_family}:{code}",
+                    "norm_id": f"{eff_snap_uid}:{eff_family}:{code}",
                     "code": code,
                     "family": eff_family,
                     "name": full_name,
@@ -303,6 +306,7 @@ def parse_base_xml_stream(
                     "section_name": section_name,
                     "table_code": table_code,
                     "table_name": table_name,
+                    "snapshot_uid": eff_snap_uid,
                     "snapshot_id": snapshot_id,
                     "base_level": base_price_level,
                     "decree": decree_text,
@@ -314,6 +318,7 @@ def parse_base_xml_stream(
                     "xml_sha256": xml_sha256,
                     "source": {
                         "dataset_number": "7707082071-fsnb",
+                        "snapshot_uid": eff_snap_uid,
                         "snapshot_id": snapshot_id,
                         "xml_file": xml_filename or f"{eff_family}.xml",
                         "xml_filename": xml_filename or f"{eff_family}.xml",
@@ -345,6 +350,7 @@ def parse_fsbc_xml_stream(
     approval_date_override: str | None = None,
     xml_filename: str | None = None,
     xml_sha256: str | None = None,
+    snapshot_uid: str | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Stream parse an FSBC catalog XML file yielding normalized base resource items.
 
@@ -424,8 +430,9 @@ def parse_fsbc_xml_stream(
 
                 app_date = approving_act_date or approval_date_override or None
 
+                eff_snap_uid = snapshot_uid or snapshot_id
                 entry = {
-                    "fsbc_id": f"{snapshot_id}:{code}",
+                    "fsbc_id": f"{eff_snap_uid}:{code}",
                     "code": code,
                     "name": name,
                     "unit": unit,
@@ -444,12 +451,14 @@ def parse_fsbc_xml_stream(
                     "publication_date": None,
                     "effective_from": effective_from_override,
                     "effective_to": None,
+                    "snapshot_uid": eff_snap_uid,
                     "snapshot_id": snapshot_id,
                     "xml_filename": xml_filename
                     or ("ФСБЦ_Маш.xml" if eff_type == "machine" else "ФСБЦ_Мат&Оборуд.xml"),
                     "xml_sha256": xml_sha256,
                     "source": {
                         "dataset_number": "7707082071-fsnb",
+                        "snapshot_uid": eff_snap_uid,
                         "snapshot_id": snapshot_id,
                         "resource_type": eff_type,
                         "xml_file": xml_filename
@@ -473,12 +482,28 @@ def parse_fsbc_xml_stream(
 class FsnbArchiveReader:
     """Safe, stream-oriented reader for FSNB OpenData ZIP distribution archives."""
 
-    def __init__(self, zip_path: Path | str, snapshot_id: str | None = None):
+    def __init__(
+        self,
+        zip_path: Path | str,
+        snapshot_id: str | None = None,
+        snapshot_uid: str | None = None,
+        distribution_guid: str | None = None,
+        dataset_number: str = "7707082071-fsnb",
+        archive_sha256: str | None = None,
+    ):
         self.zip_path = Path(zip_path)
         if not self.zip_path.is_file():
             raise FileNotFoundError(f"FSNB archive file not found: {zip_path}")
         self.snapshot_id = snapshot_id or extract_snapshot_id(self.zip_path.name)
-        self.archive_sha256 = self._calculate_archive_sha256()
+        self.dataset_number = dataset_number
+        self.distribution_guid = distribution_guid
+        self.archive_sha256 = archive_sha256 or self._calculate_archive_sha256()
+        self.snapshot_uid = snapshot_uid or build_snapshot_uid(
+            self.dataset_number,
+            distribution_guid=self.distribution_guid,
+            snapshot_id=self.snapshot_id,
+            archive_sha256=self.archive_sha256,
+        )
         self.approval_date: str | None = None
         self.effective_from: str | None = None
         self.effective_to: str | None = None
@@ -571,6 +596,7 @@ class FsnbArchiveReader:
                             approval_date_override=self.approval_date,
                             xml_filename=base_name,
                             xml_sha256=xml_sha,
+                            snapshot_uid=self.snapshot_uid,
                         )
                     self._parsed_xml.add(base_name)
                 except Exception as exc:
@@ -598,6 +624,7 @@ class FsnbArchiveReader:
                             approval_date_override=self.approval_date,
                             xml_filename=base_name,
                             xml_sha256=xml_sha,
+                            snapshot_uid=self.snapshot_uid,
                         )
                     self._parsed_xml.add(base_name)
                 except Exception as exc:
@@ -642,6 +669,8 @@ class FsnbArchiveReader:
         archive_size = self.zip_path.stat().st_size if self.zip_path.is_file() else 0
 
         return {
+            "snapshot_uid": self.snapshot_uid,
+            "snapshot_id": self.snapshot_id,
             "archive_sha256": self.archive_sha256,
             "archive_size": archive_size,
             "expected_xml_files": expected,
@@ -752,44 +781,63 @@ def compare_norm_editions(v1: dict[str, Any], v2: dict[str, Any]) -> dict[str, A
     }
 
 
+def format_norm_key(k: Any) -> str:
+    if isinstance(k, tuple):
+        return f"{k[0]} {k[1]}" if len(k) == 2 else " ".join(str(x) for x in k)
+    return str(k)
+
+
+def norm_composite_identity(k: Any, item: dict[str, Any]) -> tuple[str, str] | str:
+    if isinstance(k, tuple) and len(k) == 2:
+        return (str(k[0]), str(k[1]))
+    fam = item.get("family")
+    code = item.get("code") or str(k)
+    if fam:
+        return (str(fam), str(code))
+    return str(code)
+
+
 def compare_fsnb_editions(
-    v1_norms_by_code: dict[str, dict[str, Any]],
-    v2_norms_by_code: dict[str, dict[str, Any]],
+    v1_norms_by_code: dict[Any, dict[str, Any]],
+    v2_norms_by_code: dict[Any, dict[str, Any]],
     v1_snapshot_id: str = "v1",
     v2_snapshot_id: str = "v2",
 ) -> dict[str, Any]:
-    """Calculate aggregate and code-level diff between two FSNB snapshot sets."""
-    codes1 = set(v1_norms_by_code.keys())
-    codes2 = set(v2_norms_by_code.keys())
+    """Calculate aggregate and norm-level diff between two FSNB snapshot sets using composite (family, code) identity."""
+    map1 = {norm_composite_identity(k, v): v for k, v in v1_norms_by_code.items()}
+    map2 = {norm_composite_identity(k, v): v for k, v in v2_norms_by_code.items()}
 
-    added_codes = sorted(list(codes2 - codes1))
-    removed_codes = sorted(list(codes1 - codes2))
-    shared_codes = sorted(list(codes1 & codes2))
+    keys1 = set(map1.keys())
+    keys2 = set(map2.keys())
 
-    modified_codes = []
-    identical_codes = []
+    added_keys = sorted(list(keys2 - keys1))
+    removed_keys = sorted(list(keys1 - keys2))
+    shared_keys = sorted(list(keys1 & keys2))
+
+    modified_keys = []
+    identical_keys = []
     sample_diffs = []
 
-    for code in shared_codes:
-        diff = compare_norm_editions(v1_norms_by_code[code], v2_norms_by_code[code])
+    for key in shared_keys:
+        diff = compare_norm_editions(map1[key], map2[key])
         if diff["identical"]:
-            identical_codes.append(code)
+            identical_keys.append(key)
         else:
-            modified_codes.append(code)
+            modified_keys.append(key)
             if len(sample_diffs) < 10:
                 sample_diffs.append(diff)
 
     return {
         "v1_snapshot_id": v1_snapshot_id,
         "v2_snapshot_id": v2_snapshot_id,
-        "v1_total_norms": len(codes1),
-        "v2_total_norms": len(codes2),
-        "added_count": len(added_codes),
-        "removed_count": len(removed_codes),
-        "modified_count": len(modified_codes),
-        "identical_count": len(identical_codes),
-        "added_codes_sample": added_codes[:20],
-        "removed_codes_sample": removed_codes[:20],
-        "modified_codes_sample": modified_codes[:20],
+        "v1_total_norms": len(keys1),
+        "v2_total_norms": len(keys2),
+        "added_count": len(added_keys),
+        "removed_count": len(removed_keys),
+        "modified_count": len(modified_keys),
+        "identical_count": len(identical_keys),
+        "added_codes_sample": [format_norm_key(k) for k in added_keys[:20]],
+        "removed_codes_sample": [format_norm_key(k) for k in removed_keys[:20]],
+        "modified_codes_sample": [format_norm_key(k) for k in modified_keys[:20]],
         "sample_detailed_diffs": sample_diffs,
     }

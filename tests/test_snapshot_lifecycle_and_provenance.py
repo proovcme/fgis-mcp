@@ -3,8 +3,11 @@
 import uuid
 import zipfile
 
+import pytest
+
 from fgis_mcp import catalogs
 from fgis_mcp.opendata_xml import FsnbArchiveReader, extract_dates
+from fgis_mcp.service import Service
 from fgis_mcp.storage import Dataset
 
 SAMPLE_NORM_XML = b"""<?xml version="1.0" encoding="utf-8"?>
@@ -270,3 +273,76 @@ def test_reader_evaluate_proof(tmp_path):
     assert len(proof["failed_xml_files"]) == 0
     assert len(proof["parser_errors"]) == 0
     assert len(proof["archive_sha256"]) == 64
+
+
+def test_safe_reimport_idempotency_returns_existing(config, tmp_path):
+    """Verify that importing an identical archive a second time returns the existing snapshot without re-processing."""
+    zip_path = tmp_path / "data-20260812-structure-20240216.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("ГЭСН.xml", SAMPLE_NORM_XML)
+        zf.writestr("ФСБЦ_Мат&Оборуд.xml", SAMPLE_FSBC_XML)
+
+    svc = Service(config)
+    r1 = svc.import_opendata_archive(str(zip_path))
+    assert r1["status"] == "complete"
+    assert "reused_existing" not in r1
+
+    # Second import of the identical archive
+    r2 = svc.import_opendata_archive(str(zip_path), dataset_id=r1["dataset_id"])
+    assert r2["status"] == "complete"
+    assert r2.get("reused_existing") is True
+    assert r2["snapshot_uid"] == r1["snapshot_uid"]
+    assert r2["sha256"] == r1["sha256"]
+
+    # Verify no duplicate snapshot records in the database
+    ds = Dataset(config.root, r1["dataset_id"])
+    snaps = ds.list_snapshots(include_incomplete=True)
+    assert len(snaps) == 1
+    assert snaps[0]["snapshot_uid"] == r1["snapshot_uid"]
+
+
+def test_failed_same_date_import_isolation(config, tmp_path):
+    """Verify that a failed import of a corrupted archive with the same date preserves earlier complete snapshot."""
+    # 1. Create and import a valid snapshot with date 20260812
+    valid_zip = tmp_path / "data-20260812-first.zip"
+    with zipfile.ZipFile(valid_zip, "w") as zf:
+        zf.writestr("ГЭСН.xml", SAMPLE_NORM_XML)
+        zf.writestr("ФСБЦ_Мат&Оборуд.xml", SAMPLE_FSBC_XML)
+
+    svc = Service(config)
+    r1 = svc.import_opendata_archive(str(valid_zip))
+    assert r1["status"] == "complete"
+    snap_uid_1 = r1["snapshot_uid"]
+    assert "20260812" in snap_uid_1
+
+    ds = Dataset(config.root, r1["dataset_id"])
+    hist1 = ds.norm_history("01-01-001-01", include_incomplete=False)
+    assert hist1["total_editions"] == 1
+    assert hist1["editions"][0]["snapshot_provenance"]["snapshot_status"] == "complete"
+
+    # 2. Create another archive with the SAME date in name, but different corrupted content
+    broken_zip = tmp_path / "data-20260812-second_corrupted.zip"
+    with zipfile.ZipFile(broken_zip, "w") as zf:
+        zf.writestr("ГЭСН.xml", b"<base><unclosed_tag>")
+
+    with pytest.raises(Exception):
+        svc.import_opendata_archive(str(broken_zip), dataset_id=r1["dataset_id"])
+
+    # 3. Check database state
+    snaps = ds.list_snapshots(include_incomplete=True)
+    assert len(snaps) == 2
+
+    snap_complete = next(s for s in snaps if s["status"] == "complete")
+    snap_failed = next(s for s in snaps if s["status"] == "failed")
+
+    # Snapshot UIDs must be distinct despite sharing snapshot_id == 20260812
+    assert snap_complete["snapshot_uid"] == snap_uid_1
+    assert snap_failed["snapshot_uid"] != snap_uid_1
+    assert snap_complete["snapshot_id"] == "20260812"
+    assert snap_failed["snapshot_id"] == "20260812"
+
+    # 4. Invariant: earlier complete snapshot norms remain 100% intact and uncorrupted
+    hist_after = ds.norm_history("01-01-001-01", include_incomplete=False)
+    assert hist_after["total_editions"] == 1
+    assert hist_after["editions"][0]["snapshot_provenance"]["snapshot_status"] == "complete"
+    assert hist_after["editions"][0]["snapshot_uid"] == snap_uid_1
