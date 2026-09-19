@@ -165,6 +165,54 @@ def execute(config, job_id, network=None):
                                 data.add_document(
                                     key, {"name": task["guid"], "file": receipt["raw_file"]}, receipt
                                 )
+                            elif task["kind"] == "opendata_passport":
+                                from . import opendata
+
+                                norm_passport, body, meta = opendata.fetch_passport(
+                                    network, task["dataset_number"]
+                                )
+                                receipt = {
+                                    **meta,
+                                    "fetched_at": now(),
+                                    "request": task,
+                                    "raw_file": data.raw(body, "json"),
+                                }
+                                receipt["children"] = [
+                                    {
+                                        "kind": "opendata_file",
+                                        "source": "opendata",
+                                        "dataset_number": task["dataset_number"],
+                                        "file_url": f["source_url"],
+                                        "format": f.get("format", "bin"),
+                                    }
+                                    for f in norm_passport.get("files", [])
+                                ]
+                                data.add_document(key, norm_passport, receipt)
+                            elif task["kind"] == "opendata_file":
+                                file_url = task["file_url"]
+                                rel_path = file_url
+                                if rel_path.startswith("https://fgiscs.minstroyrf.ru/api/"):
+                                    rel_path = rel_path.replace("https://fgiscs.minstroyrf.ru/api/", "")
+                                elif rel_path.startswith("/api/"):
+                                    rel_path = rel_path.replace("/api/", "")
+                                body, meta = network.fetch(rel_path, file=True)
+                                suffix = (task.get("format") or "bin").lower()
+                                receipt = {
+                                    **meta,
+                                    "fetched_at": now(),
+                                    "request": task,
+                                    "raw_file": data.raw(body, suffix),
+                                }
+                                data.add_document(
+                                    key,
+                                    {
+                                        "name": task["dataset_number"],
+                                        "file": receipt["raw_file"],
+                                        "size": len(body),
+                                        "format": suffix,
+                                    },
+                                    receipt,
+                                )
                             else:
                                 raise ValueError("Unknown task kind")
                         for child in receipt.get("children", []):

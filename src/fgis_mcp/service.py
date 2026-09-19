@@ -108,3 +108,142 @@ class Service:
             "sqlite": str(data.db),
             "manifest": str(data.path / "manifest.json"),
         }
+
+    def compare_norms(
+        self,
+        code: str,
+        edition_a: str | None = None,
+        edition_b: str | None = None,
+        dataset_id: str | None = None,
+    ):
+        from .compare import compare_norms
+
+        if dataset_id:
+            data = Dataset(self.config.root, dataset_id)
+            records = data.query(kind="norms", code=code, limit=100).get("items", [])
+        else:
+            online_res = self.online(code, limit=100, full=True)
+            records = online_res.get("items", [])
+
+        if not records:
+            raise ValueError(f"No norm records found for code: {code}")
+
+        if len(records) == 1:
+            return {
+                "code": code,
+                "note": "Only one edition/publication found for this norm code",
+                "record": records[0],
+                "has_differences": False,
+                "summary": ["Найдена только одна редакция/публикация нормы; различия отсутствуют."],
+            }
+
+        # Select two editions to compare
+        card_a, card_b = None, None
+        if edition_a or edition_b:
+            for r in records:
+                doc = (r.get("source") or {}).get("document", "")
+                guid_val = (r.get("source") or {}).get("document_guid", "")
+                if edition_a and (edition_a in doc or edition_a == guid_val) and card_a is None:
+                    card_a = r
+                elif edition_b and (edition_b in doc or edition_b == guid_val) and card_b is None:
+                    card_b = r
+
+        card_a = card_a or records[0]
+        card_b = card_b or records[1]
+        return compare_norms(card_a, card_b)
+
+    def extract_coefficients(
+        self,
+        document_guid: str | None = None,
+        source: str = "normative",
+        table_index: int | None = None,
+    ):
+        from .coefficients import extract_coefficients_from_table, extract_document_coefficients
+
+        doc, info = self.documents.get(document_guid, source)
+        if table_index is not None:
+            if table_index >= len(doc.get("tables", [])):
+                raise ValueError("Table index is outside this document")
+            tbl = doc["tables"][table_index]
+            items = extract_coefficients_from_table(tbl, info, table_index=table_index)
+        else:
+            items = extract_document_coefficients(doc, info)
+
+        return {
+            "document": info.get("name"),
+            "document_guid": info.get("document_guid"),
+            "source": source,
+            "total_extracted": len(items),
+            "coefficients": items,
+            "provenance": info.get("provenance"),
+            "note": "Extracted coefficients preserve physical condition and note cells. Ambiguous rows are marked 'unresolved'.",
+        }
+
+    def price_history(self, code: str, dataset_id: str | None = None, zone_id: int | None = None):
+        if not dataset_id:
+            datasets = self.datasets().get("items", [])
+            if not datasets:
+                raise ValueError(
+                    "No local datasets available. Build or specify a dataset_id to query price history."
+                )
+            dataset_id = datasets[0]["dataset_id"]
+
+        data = Dataset(self.config.root, dataset_id)
+        return data.price_history(code, zone_id)
+
+    def verify_dataset(self, dataset_id: str):
+        data = Dataset(self.config.root, dataset_id)
+        manifest_path = data.path / "manifest.json"
+        if not manifest_path.is_file():
+            raise ValueError("Dataset manifest not found; job may still be in progress")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        sources_audit = []
+        for src_id, matrix in manifest.get("coverage_matrix", {}).items():
+            sources_audit.append(
+                {
+                    "source": src_id,
+                    "name": matrix.get("name_ru", src_id),
+                    "discovered_tasks": matrix.get("discovered_tasks", 0),
+                    "succeeded_tasks": matrix.get("succeeded_tasks", 0),
+                    "failed_tasks": matrix.get("failed_tasks", 0),
+                    "proof": matrix.get("proof", "unknown"),
+                    "limitations": matrix.get("known_limitations", []),
+                }
+            )
+
+        return {
+            "dataset_id": dataset_id,
+            "status": manifest.get("status"),
+            "verification_proof": manifest.get("verification_proof", "unverified"),
+            "all_requested_tasks_succeeded": manifest.get("all_requested_tasks_succeeded", False),
+            "total_tasks": manifest.get("counts", {}).get("receipts", 0),
+            "error_count": len(manifest.get("errors", [])),
+            "sources_audit": sources_audit,
+            "counts": manifest.get("counts", {}),
+            "full_fsnb_coverage_verified": manifest.get("full_fsnb_coverage_verified", False),
+            "coverage_note": manifest.get("coverage_note", ""),
+        }
+
+    def import_manual_file(
+        self,
+        dataset_id: str,
+        file_path: str,
+        source: str = "ter",
+        edition: str | None = None,
+        note: str | None = None,
+    ):
+        from .manual_import import import_manual_file
+
+        return import_manual_file(self.config.root, dataset_id, file_path, source, edition, note)
+
+    def opendata_list(self):
+        from .opendata import list_known_opendata
+
+        return {"items": list_known_opendata(self.network)}
+
+    def opendata_get(self, dataset_number: str):
+        from .opendata import fetch_passport
+
+        passport, _, meta = fetch_passport(self.network, dataset_number)
+        return {"passport": passport, "provenance": meta}

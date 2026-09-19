@@ -222,6 +222,58 @@ def create_server(config):
         """Export stopped dataset to jsonl and/or parquet. SQLite always exists; return files and hashes."""
         return service.export(dataset_id, formats if formats is not None else ["jsonl", "parquet"])
 
+    @server.tool(annotations=read)
+    def fgis_compare_norms(
+        code: str,
+        edition_a: str | None = None,
+        edition_b: str | None = None,
+        dataset_id: str | None = None,
+    ) -> dict:
+        """Compare two editions or publications of a norm code: differences in work steps, resources, units."""
+        return service.compare_norms(code, edition_a, edition_b, dataset_id)
+
+    @server.tool(annotations=read)
+    def fgis_extract_coefficients(
+        document_guid: str | None = None,
+        source: str = "normative",
+        table_index: int | None = None,
+    ) -> dict:
+        """Extract structured coefficient evidence and conditions from document technical parts.
+        Preserves condition text, note text, multipliers. If structure is ambiguous, returns status='unresolved'.
+        """
+        return service.extract_coefficients(document_guid, source, table_index)
+
+    @server.tool(annotations=read)
+    def fgis_price_history(code: str, dataset_id: str | None = None, zone_id: int | None = None) -> dict:
+        """Query resource price timeline across all available periods in a dataset."""
+        return service.price_history(code, dataset_id, zone_id)
+
+    @server.tool(annotations=local)
+    def fgis_verify_dataset(dataset_id: str) -> dict:
+        """Strictly audit dataset completeness: verify totalCount proofs, task integrity, coverage matrix."""
+        return service.verify_dataset(dataset_id)
+
+    @server.tool(annotations=write)
+    def fgis_import_manual_file(
+        dataset_id: str,
+        file_path: str,
+        source: str = "ter",
+        edition: str | None = None,
+        note: str | None = None,
+    ) -> dict:
+        """Import manually downloaded official TER or archive file into a dataset with SHA-256 provenance."""
+        return service.import_manual_file(dataset_id, file_path, source, edition, note)
+
+    @server.tool(annotations=read)
+    def fgis_opendata_list() -> dict:
+        """List official OpenData datasets and passports (FSNB-2022, FSNB-2020 / FER)."""
+        return service.opendata_list()
+
+    @server.tool(annotations=read)
+    def fgis_opendata_get(dataset_number: str) -> dict:
+        """Fetch official OpenData passport metadata, versions, and file distributions."""
+        return service.opendata_get(dataset_number)
+
     @server.resource("fgis://help")
     def help_resource() -> str:
         return dump(

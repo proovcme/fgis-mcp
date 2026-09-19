@@ -202,6 +202,45 @@ class Dataset:
             "items": items,
         }
 
+    def price_history(self, code: str, zone_id: int | None = None):
+        """Retrieve price history across all available periods for a resource code."""
+        clauses = ["code=?"]
+        params = [code]
+        if zone_id is not None:
+            clauses.append("zone_id=?")
+            params.append(zone_id)
+        where = " WHERE " + " AND ".join(clauses)
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"SELECT payload, zone_id, period_id FROM prices {where} ORDER BY period_id ASC, zone_id ASC",
+                params,
+            ).fetchall()
+        records = []
+        for r in rows:
+            p = json.loads(r[0])
+            records.append(
+                {
+                    "period_id": r[2],
+                    "zone_id": r[1],
+                    "code": p.get("code"),
+                    "name": p.get("name"),
+                    "unit": p.get("unit"),
+                    "price_base": p.get("price_base"),
+                    "price_release": p.get("price_release"),
+                    "price_current": p.get("price_current"),
+                    "index": p.get("index"),
+                    "sheet": p.get("sheet"),
+                    "row": p.get("row"),
+                    "provenance": p.get("provenance"),
+                }
+            )
+        return {
+            "dataset_id": self.id,
+            "code": code,
+            "total_records": len(records),
+            "records": records,
+        }
+
     def export(self, formats=("jsonl",)):
         if any(f not in {"jsonl", "parquet"} for f in formats):
             raise ValueError("Formats: jsonl, parquet (SQLite is always present)")
@@ -237,6 +276,8 @@ class Dataset:
         return outputs
 
     def manifest(self, *, status, tasks, errors):
+        from .coverage import evaluate_coverage
+
         with self.connect() as conn:
             counts = {
                 table: conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
@@ -262,6 +303,9 @@ class Dataset:
         for entry in coverage.values():
             entry["pending_or_failed_tasks"] = entry["discovered_tasks"] - entry["succeeded_tasks"]
             entry["requested_traversal_complete"] = entry["pending_or_failed_tasks"] == 0
+
+        multi_dim_eval = evaluate_coverage(tasks, sources, errors)
+
         manifest = {
             "schema": "fgis.dataset.v1",
             "dataset_id": self.id,
@@ -269,6 +313,8 @@ class Dataset:
             "status": status,
             "counts": counts,
             "coverage_by_source": coverage,
+            "coverage_matrix": multi_dim_eval["sources"],
+            "verification_proof": multi_dim_eval["verification_proof"],
             "requested_tasks": tasks,
             "all_requested_tasks_succeeded": not errors
             and all(e["requested_traversal_complete"] for e in coverage.values()),

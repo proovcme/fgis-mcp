@@ -31,10 +31,20 @@ def test_stdio_discovery_and_offline_call(tmp_path, mode):
                 "fgis_search_document",
                 "fgis_document_outline",
                 "fgis_read_document_table",
+                "fgis_compare_norms",
+                "fgis_extract_coefficients",
+                "fgis_price_history",
+                "fgis_verify_dataset",
+                "fgis_import_manual_file",
+                "fgis_opendata_list",
+                "fgis_opendata_get",
             }.issubset({t.name for t in listed.tools})
             result = await client.call_tool("fgis_list_datasets", {})
             assert not result.is_error
             assert json.loads(result.content[0].text)["items"] == []
+            opendata_res = await client.call_tool("fgis_opendata_list", {})
+            assert not opendata_res.is_error
+            assert json.loads(opendata_res.content[0].text)["items"]
             resource = await client.read_resource("fgis://help")
             assert resource.contents
             bad = await client.call_tool("fgis_dataset_info", {"dataset_id": "../outside"})

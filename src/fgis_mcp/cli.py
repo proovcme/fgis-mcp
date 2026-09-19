@@ -35,7 +35,19 @@ def main():
         "command",
         nargs="?",
         default="serve",
-        choices=["serve", "diagnose", "download", "job", "cancel", "resume", "datasets", "export"],
+        choices=[
+            "serve",
+            "diagnose",
+            "download",
+            "job",
+            "cancel",
+            "resume",
+            "datasets",
+            "export",
+            "audit",
+            "verify",
+            "import",
+        ],
     )
     parser.add_argument("--transport", choices=["stdio", "streamable-http"], default="stdio")
     parser.add_argument("--host", default="127.0.0.1")
@@ -49,6 +61,10 @@ def main():
     parser.add_argument("--zone", type=int)
     parser.add_argument("--period", type=int)
     parser.add_argument("--id")
+    parser.add_argument("--file")
+    parser.add_argument("--edition")
+    parser.add_argument("--note")
+    parser.add_argument("--output")
     parser.add_argument("--format", action="append", choices=["jsonl", "parquet"])
     args = parser.parse_args()
     try:
@@ -97,6 +113,56 @@ def main():
             )
         elif args.command == "datasets":
             result = service.datasets()
+        elif args.command == "verify":
+            if not args.id:
+                parser.error("verify requires --id")
+            result = service.verify_dataset(args.id)
+        elif args.command == "import":
+            if not args.id:
+                parser.error("import requires --id")
+            if not args.file:
+                parser.error("import requires --file")
+            src = args.source[0] if args.source else "ter"
+            result = service.import_manual_file(
+                args.id, args.file, source=src, edition=args.edition, note=args.note
+            )
+        elif args.command == "audit":
+            from pathlib import Path
+
+            from . import catalogs
+            from .network import SourceError
+            from .storage import now
+
+            audit_report = {
+                "checked_at": now(),
+                "scope": "root contracts and OpenData; non-intrusive smoke audit",
+                "sources": [],
+            }
+            all_ok = True
+            for task in catalogs.task_roots(["all_public"]):
+                src = task["source"]
+                try:
+                    payload, _, meta = service.network.get_value(*catalogs.request(task))
+                    child_tasks = catalogs.children(payload, task)
+                    entry = {
+                        "source": src,
+                        "ok": True,
+                        "root_items": len(catalogs.items_from(payload, task)),
+                        "next_tasks": len(child_tasks),
+                        **meta,
+                    }
+                except SourceError as exc:
+                    entry = {"source": src, "ok": False, "error": exc.as_dict()}
+                    all_ok = False
+                audit_report["sources"].append(entry)
+
+            result = audit_report
+            if args.output:
+                out_path = Path(args.output).expanduser().resolve()
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_text(dump(audit_report), encoding="utf-8")
+            if not all_ok:
+                raise SystemExit(1)
         else:
             if not args.id:
                 parser.error("export requires --id")
