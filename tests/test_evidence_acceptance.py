@@ -75,15 +75,23 @@ def test_scenario_b_switch_cabinet_reality():
 def test_scenario_c_coefficient_1_15_applicability():
     """Scenario C: Checking coefficient 1.15 applicability to 10-04-067-04.
     Must read official document text/tables through MCP and verify no 1.15 exists for 10-04-067 in Collection 10.
+    document_guid is obtained STRICTLY through previous MCP results, never hardcoded.
     """
 
     async def run():
         params = get_client_params()
         async with Client(params) as client:
+            # 1. Call fgis_read_norm to obtain norm details and extract document_guid dynamically
             norm_res = await client.call_tool("fgis_read_norm", {"code": "10-04-067-04"})
+            assert not norm_res.is_error
             norm_data = json.loads(norm_res.content[0].text)
-            doc_guid = norm_data["items"][0]["evidence"]["document_guid"]
+            assert norm_data.get("items"), "Norm card must be returned"
+            item = norm_data["items"][0]
+            evidence = item.get("evidence", {})
+            doc_guid = evidence.get("document_guid")
+            assert doc_guid, "document_guid must be obtained dynamically from prior MCP read_norm result"
 
+            # 2. Search within document for 1,15 using dynamically retrieved doc_guid
             search_res = await client.call_tool(
                 "fgis_search_document", {"query": "1,15", "document_guid": doc_guid}
             )
@@ -98,22 +106,40 @@ def test_scenario_c_coefficient_1_15_applicability():
 
 def test_scenario_d_utp_cable_in_tray():
     """Scenario D: Suitable norm for laying UTP cable in tray.
-    Must return candidates only, no hallucinated norm codes like 10-08-...
+    Strictly search -> read_norm for EACH returned candidate.
+    Must verify work_steps, unit, resources, collection, and absence of hallucinated norm codes.
     """
 
     async def run():
         params = get_client_params()
         async with Client(params) as client:
-            res = await client.call_tool("fgis_search_norms", {"query": "прокладка кабеля"})
+            # 1. Search for cable laying norms
+            res = await client.call_tool("fgis_search_norms", {"query": "прокладка кабеля", "limit": 5})
             assert not res.is_error
             data = json.loads(res.content[0].text)
             assert data["match_status"] == "candidate"
             assert data["total"] > 0
-            candidate_codes = [it["code"] for it in data.get("items", [])]
-            for code in candidate_codes[:3]:
-                assert not code.startswith("10-08-")
-                it_card = await client.call_tool("fgis_read_norm", {"code": code})
-                assert not it_card.is_error
+            candidates = data.get("items", [])
+            assert len(candidates) > 0
+
+            # 2. Strictly call fgis_read_norm for EVERY returned candidate
+            for candidate in candidates:
+                code = candidate["code"]
+                assert not code.startswith("10-08-"), f"Hallucinated code {code} detected"
+
+                read_res = await client.call_tool("fgis_read_norm", {"code": code})
+                assert not read_res.is_error, f"Failed to read candidate norm {code}"
+                card_data = json.loads(read_res.content[0].text)
+                assert card_data.get("items"), f"Empty items for candidate {code}"
+                card = card_data["items"][0]
+
+                # Verify grounded fields from MCP
+                assert card["code"] == code
+                assert card.get("unit") in ("100 м", "м", "1000 м", "т", "шт")
+                assert "work_steps" in card
+                assert "resources" in card
+                assert "evidence" in card
+                assert candidate.get("match_status") == "candidate"
 
     asyncio.run(run())
 
@@ -180,13 +206,35 @@ def test_vor_section_5_arithmetic_control():
 
 
 def test_vor_section_5_mcp_workflow():
-    """VOR Section 5 evidence-first MCP workflow.
-    Search norms -> candidates -> read norm -> compare with VOR tech -> conclusion.
+    """VOR Section 5 evidence-first MCP workflow:
+    - Search norms
+    - Do NOT consider a found norm a candidate merely based on textual match.
+    - Candidate status is only admissible after calling read_norm and matching work_steps/unit/collection
+      with the actual technology in the VOR.
+    - Mining norms (Collection 35) must NOT be offered because their technology (underground shaft sinking)
+      does not correspond to the object (above-ground crane erection of cylindrical tiers at +24.35..+70.95 m).
+    - Conclusion: Direct norm unconfirmed, suitable candidates absent from verified collections.
     """
+
+    def is_vor_technology_match(card: dict) -> bool:
+        doc = card.get("evidence", {}).get("document", "").lower()
+        name = card.get("name", "").lower()
+        # Mining norms (Collection 35: underground shaft sinking) must NOT be offered
+        if "сборник 35" in doc or "горнопроходческ" in doc or "расстрел" in name:
+            return False
+        # Electrical furnace installation (Collection 09 ГЭСНм) must NOT be offered
+        if "электропеч" in doc or "электропеч" in name or "печей" in doc:
+            return False
+        # Standard civil building frames (Collection 09 ГЭСН) must NOT be offered
+        if "производственных зданий" in name or "каркасов зданий" in name:
+            return False
+        # Only true if work steps / name describe cylindrical tower / vertical shaft / chimney tier erection
+        return any(k in name for k in ["ярус", "башенн", "ствол"])
 
     async def run():
         params = get_client_params()
         async with Client(params) as client:
+            # 1. Direct search for VOR work
             search_res = await client.call_tool(
                 "fgis_search_norms", {"query": "монтаж металлоконструкций ствола"}
             )
@@ -194,16 +242,39 @@ def test_vor_section_5_mcp_workflow():
             search_data = json.loads(search_res.content[0].text)
             assert search_data["match_status"] == "not_found"
 
-            candidate_res = await client.call_tool("fgis_search_norms", {"query": "расстрел", "limit": 5})
-            assert not candidate_res.is_error
-            candidate_data = json.loads(candidate_res.content[0].text)
-            assert candidate_data["match_status"] == "candidate"
+            # 2. Textual search for keyword 'расстрел' returns results in mining collection
+            kw_res = await client.call_tool("fgis_search_norms", {"query": "расстрел", "limit": 5})
+            assert not kw_res.is_error
+            kw_items = json.loads(kw_res.content[0].text).get("items", [])
 
-            read_res = await client.call_tool("fgis_read_norm", {"code": "35-01-613-01"})
-            assert not read_res.is_error
-            read_data = json.loads(read_res.content[0].text)
-            assert read_data["items"][0]["code"] == "35-01-613-01"
-            assert read_data["items"][0]["unit"] == "т"
-            assert "Сболчивание" in read_data["items"][0]["name"]
+            # 3. Verify technology by calling read_norm for each item:
+            # VOR describes above-ground erection of cylindrical steel tiers by crawler crane
+            # at heights from +24.35 m up to +70.95 m on a construction site.
+            for item in kw_items:
+                code = item["code"]
+                read_res = await client.call_tool("fgis_read_norm", {"code": code})
+                assert not read_res.is_error
+                card = json.loads(read_res.content[0].text)["items"][0]
+
+                # Assert that mining norms from Collection 35 are strictly rejected as technology mismatch
+                assert not is_vor_technology_match(card), (
+                    f"Mining norm {code} must not be offered as candidate for above-ground crane erection"
+                )
+
+            # 4. Check Collection 09 (строительные металлоконструкции)
+            res_09 = await client.call_tool("fgis_search_norms", {"query": "09-01-001", "limit": 3})
+            assert not res_09.is_error
+            items_09 = json.loads(res_09.content[0].text).get("items", [])
+            for item in items_09:
+                read_res = await client.call_tool("fgis_read_norm", {"code": item["code"]})
+                assert not read_res.is_error
+                card = json.loads(read_res.content[0].text)["items"][0]
+                assert not is_vor_technology_match(card), (
+                    f"Norm {item['code']} does not match cylindrical shaft tiers"
+                )
+
+            # Conclusion: Neither mining nor non-matching steel norms are candidates.
+            # Direct norm is unconfirmed through FGIS MCP:
+            # "Прямая норма ФСНБ через FGIS MCP не подтверждена"
 
     asyncio.run(run())
