@@ -15,8 +15,8 @@ def create_server(config):
             "FGIS MCP is an evidence-first factual source for official FGIS CS (Минстрой России) data. "
             "Evidence rule: no evidence from MCP -> no fact in answer (UNSUPPORTED_BY_FGIS_MCP). "
             "1. Search first: before claiming that a norm exists or proposing a norm, call fgis_search_norms. "
-            "2. Read the specific norm: before claiming what a norm includes, its unit, work steps, resources or technical characteristics, call fgis_read_norm. "
-            "3. Read official documents: before any normative conclusion, technical part citation, or methodology rule, read the official text via fgis_read_document, fgis_search_document, fgis_document_outline or fgis_read_document_table. "
+            "2. Read the specific norm: before claiming what a norm includes, its unit, work steps, resources, mass, or technical characteristics, call fgis_read_norm. It returns the self-contained norm card (hierarchy, work steps, resources, mass, separate editions, structured provenance). Do NOT call fgis_read_document merely to inspect norm resources or work steps. "
+            "3. Read official documents: before any normative conclusion, technical part citation, or methodology rule, read the official text via fgis_read_document, fgis_search_document, fgis_document_outline or fgis_read_document_table. These tools provide surrounding context (technical parts, general provisions, table coefficients, annexes) and do NOT duplicate the norm card. "
             "4. Never reconstruct norm codes from model memory; never invent codes absent from MCP results. "
             "5. Never invent analogues; show analogues only if returned by MCP search, and label them as candidates. "
             "6. Never substitute model knowledge for missing search results; if unconfirmed, state 'не найдено' or 'нормативное основание не подтверждено'. "
@@ -79,10 +79,13 @@ def create_server(config):
 
     @server.tool(annotations=read)
     def fgis_read_norm(code: str, limit: int = 20, offset: int = 0) -> dict:
-        """Read exact bare norm code online, including work steps and original resource quantities.
+        """Read exact bare norm card online: code, name, unit, hierarchy (collection/dept/section/table),
+        work steps, resources, mass, special indicators, separate editions and structured provenance.
+        Returns a compact self-contained card without duplicated data.
         Use this tool before claiming what a norm includes, its unit, work steps, resources or technical characteristics.
+        Do NOT call fgis_read_document merely to inspect norm resources or work steps — use fgis_read_norm instead.
         """
-        return service.online(code, limit, offset, full=True)
+        return service.read_norm(code)
 
     @server.tool(annotations=read)
     def fgis_read_document(
@@ -93,8 +96,9 @@ def create_server(config):
         expected_sha256: str | None = None,
         refresh: bool = False,
     ) -> dict:
-        """Read a public document/technical part online as text, without a dataset or disk cache.
-        Use before claiming any methodology clause, technical part, application condition, exception, note, or normative justification.
+        """Read surrounding normative document text online (technical part, introductory notes, application rules, annexes, table coefficients).
+        Does NOT duplicate the norm card. Use fgis_read_norm to inspect norm resources/work steps.
+        Use fgis_read_document when you need official document context: technical parts (техническая часть), general provisions (общие указания), application conditions, exceptions, notes, or coefficient justifications.
         Use document_refs from browse: source='normative' + GUID for FSNB/FER/methods/PIR;
         source='fssc'/'fsem' without GUID for those full documents. Offsets are text characters.
         Pass prior provenance.sha256 as expected_sha256 to guard against changed documents.

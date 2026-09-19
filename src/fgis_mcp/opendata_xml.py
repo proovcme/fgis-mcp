@@ -290,16 +290,47 @@ def parse_base_xml_stream(
                 pub_date = creation_date or None
 
                 eff_snap_uid = snapshot_uid or snapshot_id
+                hierarchy = {
+                    "collection": (
+                        f"Сборник {collection_code}. {collection_name}".strip()
+                        if collection_code or collection_name
+                        else None
+                    ),
+                    "department": None,
+                    "section": (
+                        f"Раздел {section_code}. {section_name}".strip()
+                        if section_code or section_name
+                        else None
+                    ),
+                    "subsection": None,
+                    "table": (
+                        f"Таблица {table_code} {table_name}".strip() if table_code or table_name else None
+                    ),
+                    "full_path": [p for p in [collection_name, section_name, table_name] if p],
+                }
+                special_indicators = [massa] if massa else []
+                provenance = {
+                    "source": "opendata",
+                    "document_guid": None,
+                    "source_url": None,
+                    "edition": decree_text or snapshot_id or eff_snap_uid,
+                    "sha256": xml_sha256,
+                }
                 card = {
                     "norm_id": f"{eff_snap_uid}:{eff_family}:{code}",
                     "code": code,
                     "family": eff_family,
                     "name": full_name,
                     "unit": unit,
+                    "hierarchy": hierarchy,
                     "work_steps": work_steps,
                     "resources": resources,
                     "nr_sp": nr_sp,
                     "massa": massa,
+                    "special_indicators": special_indicators,
+                    "document_guid": None,
+                    "edition": decree_text or snapshot_id or eff_snap_uid,
+                    "provenance": provenance,
                     "collection_code": collection_code,
                     "collection_name": collection_name,
                     "section_code": section_code,

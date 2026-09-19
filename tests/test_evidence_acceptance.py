@@ -62,15 +62,15 @@ def test_scenario_b_switch_cabinet_reality():
             result = await client.call_tool("fgis_read_norm", {"code": "10-04-067-04"})
             assert not result.is_error
             data = json.loads(result.content[0].text)
-            assert data["total"] >= 1
-            item = data["items"][0]
-            assert item["name"] == "Шкаф коммутаторов"
-            assert item["unit"] == "шт"
-            assert item["family"] == "ГЭСНм"
-            assert "evidence" in item
-            doc_info = item["evidence"].get("document", "")
-            assert "Телевизионных центров" in doc_info or "телевизионных" in doc_info.lower()
-            assert isinstance(item.get("resources"), list)
+            assert data["code"] == "10-04-067-04"
+            assert data["name"] == "Шкаф коммутаторов"
+            assert data["unit"] == "шт"
+            assert data["family"] == "ГЭСНм"
+            section = data["hierarchy"].get("section") or ""
+            table = data["hierarchy"].get("table") or ""
+            assert "телевизионных" in section.lower() or "телевизионных" in table.lower()
+            assert isinstance(data.get("resources"), list)
+            assert len(data["resources"]) > 0
 
     asyncio.run(run())
 
@@ -89,11 +89,22 @@ def test_scenario_c_coefficient_1_15_applicability():
             norm_res = await client.call_tool("fgis_read_norm", {"code": "10-04-067-04"})
             assert not norm_res.is_error
             norm_data = json.loads(norm_res.content[0].text)
-            assert norm_data.get("items"), "Norm card must be returned"
-            item = norm_data["items"][0]
-            evidence = item.get("evidence", {})
-            doc_guid = evidence.get("document_guid")
+            assert norm_data["code"] == "10-04-067-04"
+            assert norm_data["name"] == "Шкаф коммутаторов"
+            assert norm_data["unit"] == "шт"
+            assert norm_data["hierarchy"]["collection"] == "Сборник 10. Оборудование связи"
+            assert norm_data["massa"] is not None
+            assert norm_data["massa"]["value"] == 0.215
+            assert norm_data["has_multiple_editions"] is True
+            assert norm_data["total_editions"] == 2
+            assert norm_data["editions_identical"] is False
+            assert norm_data["editions_differences"] is not None
+            assert len(norm_data["editions"]) == 2
+            assert norm_data["provenance"]["source"] == "online_api"
+
+            doc_guid = norm_data.get("document_guid")
             assert doc_guid, "document_guid must be obtained dynamically from prior MCP read_norm result"
+            assert norm_data["provenance"]["document_guid"] == doc_guid
 
             # 2. Search within document for 1,15 using dynamically retrieved doc_guid
             search_res = await client.call_tool(
@@ -134,16 +145,14 @@ def test_scenario_d_utp_cable_in_tray():
 
                 read_res = await client.call_tool("fgis_read_norm", {"code": code})
                 assert not read_res.is_error, f"Failed to read candidate norm {code}"
-                card_data = json.loads(read_res.content[0].text)
-                assert card_data.get("items"), f"Empty items for candidate {code}"
-                card = card_data["items"][0]
+                card = json.loads(read_res.content[0].text)
 
-                # Verify grounded fields from MCP
+                # Verify grounded fields from compact MCP norm card
                 assert card["code"] == code
                 assert card.get("unit") in ("100 м", "м", "1000 м", "т", "шт")
                 assert "work_steps" in card
                 assert "resources" in card
-                assert "evidence" in card
+                assert "provenance" in card
                 assert candidate.get("match_status") == "candidate"
 
     asyncio.run(run())
@@ -250,9 +259,7 @@ def test_vor_section_5_mcp_workflow():
 
                 read_res = await client.call_tool("fgis_read_norm", {"code": code})
                 assert not read_res.is_error
-                card_data = json.loads(read_res.content[0].text)
-                assert card_data.get("items"), f"Empty items for {code}"
-                card = card_data["items"][0]
+                card = json.loads(read_res.content[0].text)
 
                 # 4. Norm card must contain all required factual fields
                 assert card["code"] == code
@@ -260,7 +267,7 @@ def test_vor_section_5_mcp_workflow():
                 assert "unit" in card and card["unit"]
                 assert "work_steps" in card and isinstance(card["work_steps"], list)
                 assert "resources" in card and isinstance(card["resources"], list)
-                assert "evidence" in card and isinstance(card["evidence"], dict)
-                assert "source" in card["evidence"]
+                assert "provenance" in card and isinstance(card["provenance"], dict)
+                assert "source" in card["provenance"]
 
     asyncio.run(run())

@@ -38,9 +38,181 @@ class Service:
         rows, _, meta = self.network.get_json(path, params)
         return {"items": rows, "provenance": {**meta, "fetched_at": now()}}
 
+    def read_norm(self, code: str) -> dict:
+        if not isinstance(code, str) or not 1 <= len(code.strip()) <= 200:
+            raise ValueError("code must contain 1..200 characters")
+        q_clean = code.strip()
+        records, _, _ = self.network.get_json("FullTextSearch/SearchEstimatedRates", {"search": q_clean})
+        cards = norm_cards(records)
+        cards = [card for card in cards if card["code"].casefold() == q_clean.casefold()]
+
+        if not cards:
+            return {
+                "code": q_clean,
+                "name": None,
+                "unit": None,
+                "family": None,
+                "hierarchy": {
+                    "collection": None,
+                    "department": None,
+                    "section": None,
+                    "subsection": None,
+                    "table": None,
+                    "full_path": [],
+                },
+                "work_steps": [],
+                "resources": [],
+                "massa": None,
+                "special_indicators": [],
+                "document_guid": None,
+                "record_id": None,
+                "edition": None,
+                "provenance": None,
+                "has_multiple_editions": False,
+                "total_editions": 0,
+                "editions_identical": True,
+                "editions_differences": None,
+                "editions_note": None,
+                "editions": [],
+                "match_status": "not_found",
+                "message": "Прямая норма ФСНБ через FGIS MCP не подтверждена",
+            }
+
+        primary = cards[0]
+
+        def _compact_res(r):
+            return {
+                "code": r.get("code"),
+                "name": r.get("name"),
+                "unit": r.get("unit"),
+                "quantity": r.get("quantity"),
+            }
+
+        compact_editions = [
+            {
+                "edition_index": idx,
+                "record_id": c.get("source", {}).get("record_id"),
+                "document_guid": c.get("document_guid"),
+                "document": c.get("hierarchy", {}).get("collection") or c.get("source", {}).get("document"),
+                "name": c.get("name"),
+                "unit": c.get("unit"),
+                "total_resources": len(c.get("resources", [])),
+                "provenance": c.get("provenance"),
+            }
+            for idx, c in enumerate(cards, 1)
+        ]
+
+        from .compare import compare_norms
+
+        total_editions = len(cards)
+        has_multiple_editions = total_editions > 1
+        editions_differences = None
+        editions_identical = True
+
+        if total_editions > 1:
+            diffs = []
+            for i in range(1, total_editions):
+                diff = compare_norms(cards[0], cards[i])
+                if diff.get("has_differences"):
+                    editions_identical = False
+                    d_res = diff.get("details", {}).get("resources", {})
+                    d_works = diff.get("details", {}).get("work_steps", {})
+                    diffs.append(
+                        {
+                            "edition_a_index": 1,
+                            "edition_b_index": i + 1,
+                            "edition_a_record_id": cards[0].get("source", {}).get("record_id"),
+                            "edition_b_record_id": cards[i].get("source", {}).get("record_id"),
+                            "edition_a_guid": cards[0].get("document_guid"),
+                            "edition_b_guid": cards[i].get("document_guid"),
+                            "summary": diff.get("summary", []),
+                            "details": {
+                                "work_steps_added": d_works.get("added", []),
+                                "work_steps_removed": d_works.get("removed", []),
+                                "resources_added": [_compact_res(r) for r in d_res.get("added", [])],
+                                "resources_removed": [_compact_res(r) for r in d_res.get("removed", [])],
+                                "resources_modified": [
+                                    {
+                                        "code": m["code"],
+                                        "name": m["name"],
+                                        "before": {
+                                            "quantity": m["before"]["quantity"],
+                                            "unit": m["before"]["unit"],
+                                        },
+                                        "after": {
+                                            "quantity": m["after"]["quantity"],
+                                            "unit": m["after"]["unit"],
+                                        },
+                                    }
+                                    for m in d_res.get("modified", [])
+                                ],
+                                "unchanged_resources_count": d_res.get("unchanged_count", 0),
+                            },
+                        }
+                    )
+
+            if editions_identical:
+                editions_note = f"В ФГИС ЦС обнаружено {total_editions} публикации нормы с идентичным составом работ и ресурсов."
+            else:
+                editions_differences = diffs
+                editions_note = (
+                    f"В ФГИС ЦС обнаружено {total_editions} публикации нормы с различиями в составе ресурсов/работ. "
+                    "Редакции кратко описаны в 'editions', различия — в 'editions_differences'. "
+                    "Не делайте предположений о приоритете одной редакции над другой без проектных оснований."
+                )
+        else:
+            editions_note = "Единственная публикация нормы в источнике."
+
+        return {
+            "code": primary.get("code", q_clean),
+            "name": primary.get("name"),
+            "unit": primary.get("unit"),
+            "family": primary.get("family"),
+            "hierarchy": primary.get("hierarchy"),
+            "work_steps": primary.get("work_steps", []),
+            "resources": [_compact_res(r) for r in primary.get("resources", [])],
+            "massa": primary.get("massa"),
+            "special_indicators": primary.get("special_indicators", []),
+            "document_guid": primary.get("document_guid"),
+            "record_id": primary.get("record_id") or (primary.get("source") or {}).get("record_id"),
+            "edition": primary.get("edition"),
+            "provenance": primary.get("provenance"),
+            "has_multiple_editions": has_multiple_editions,
+            "total_editions": total_editions,
+            "editions_identical": editions_identical,
+            "editions_differences": editions_differences,
+            "editions_note": editions_note,
+            "editions": compact_editions,
+            "match_status": "exact",
+            "message": "Найдено точное совпадение нормы",
+        }
+
     def online(self, query, limit=20, offset=0, *, full=False):
         if not isinstance(query, str) or not 1 <= len(query.strip()) <= 200:
             raise ValueError("query must contain 1..200 characters")
+        if full:
+            card = self.read_norm(query)
+            q_clean = query.strip()
+            records, _, meta = self.network.get_json(
+                "FullTextSearch/SearchEstimatedRates", {"search": q_clean}
+            )
+            cards = norm_cards(records)
+            cards = [c for c in cards if c["code"].casefold() == q_clean.casefold()]
+            paged = page(cards, limit, offset)
+            return {
+                **card,
+                **paged,
+                "evidence": (cards[0].get("evidence") if cards else None)
+                or {
+                    "source": "online_api",
+                    "source_type": "SearchEstimatedRates",
+                    "source_url": meta.get("source_url"),
+                    "sha256": meta.get("sha256"),
+                },
+                "edition_selection": "All returned publications retained; numeric record IDs do not prove currency",
+                "coverage": "Pagination is local to this API response; upstream search completeness is unknown",
+            }
+
         records, _, meta = self.network.get_json("FullTextSearch/SearchEstimatedRates", {"search": query})
         cards = norm_cards(records)
         q_clean = query.strip()
@@ -53,12 +225,7 @@ class Service:
             else:
                 card["match_status"] = "candidate"
 
-        if full:
-            cards = [card for card in cards if card["code"].casefold() == q_clean.casefold()]
-        else:
-            cards = [
-                {k: v for k, v in card.items() if k not in {"resources", "work_steps"}} for card in cards
-            ]
+        cards = [{k: v for k, v in card.items() if k not in {"resources", "work_steps"}} for card in cards]
 
         if not cards:
             overall_status = "not_found"
@@ -66,7 +233,7 @@ class Service:
         elif any(c.get("match_status") == "exact" for c in cards):
             overall_status = (
                 "exact"
-                if (full or any(c.get("code", "").casefold() == q_clean.casefold() for c in cards))
+                if any(c.get("code", "").casefold() == q_clean.casefold() for c in cards)
                 else "candidate"
             )
             msg = "Найдено точное совпадение нормы" if overall_status == "exact" else "Найдены кандидаты норм"

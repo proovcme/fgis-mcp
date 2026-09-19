@@ -1,6 +1,6 @@
-"""Comparison of norm cards and price records across different editions and periods."""
-
 from typing import Any
+
+from .units import are_quantities_equivalent
 
 
 def compare_norms(norm_a: dict[str, Any], norm_b: dict[str, Any]) -> dict[str, Any]:
@@ -49,7 +49,7 @@ def compare_norms(norm_a: dict[str, Any], norm_b: dict[str, Any]) -> dict[str, A
         unit_a = item_a.get("unit")
         unit_b = item_b.get("unit")
 
-        if qty_a != qty_b or raw_a != raw_b or unit_a != unit_b:
+        if not are_quantities_equivalent(qty_a, unit_a, qty_b, unit_b, raw_a=raw_a, raw_b=raw_b):
             modified_resources.append(
                 {
                     "code": c,
@@ -97,17 +97,22 @@ def compare_norms(norm_a: dict[str, Any], norm_b: dict[str, Any]) -> dict[str, A
     if not has_differences:
         summary_items.append("Различий в составе работ, единице измерения и ресурсах не обнаружено.")
 
+    rec_id_a = (norm_a.get("source") or {}).get("record_id") or norm_a.get("record_id")
+    rec_id_b = (norm_b.get("source") or {}).get("record_id") or norm_b.get("record_id")
+
     return {
         "code": code,
         "edition_a": {
             "document": doc_a,
-            "guid": (norm_a.get("source") or {}).get("document_guid"),
+            "guid": (norm_a.get("source") or {}).get("document_guid") or norm_a.get("document_guid"),
+            "record_id": rec_id_a,
             "name": norm_a.get("name"),
             "unit": norm_a.get("unit"),
         },
         "edition_b": {
             "document": doc_b,
-            "guid": (norm_b.get("source") or {}).get("document_guid"),
+            "guid": (norm_b.get("source") or {}).get("document_guid") or norm_b.get("document_guid"),
+            "record_id": rec_id_b,
             "name": norm_b.get("name"),
             "unit": norm_b.get("unit"),
         },

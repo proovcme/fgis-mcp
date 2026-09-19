@@ -45,6 +45,57 @@ def array(record, key):
     return value
 
 
+def parse_hierarchy(raw_doc):
+    """Parse hierarchical levels from source document name (collection, department, section, subsection, table)."""
+    if not raw_doc:
+        return {
+            "collection": None,
+            "department": None,
+            "section": None,
+            "subsection": None,
+            "table": None,
+            "full_path": [],
+        }
+    raw_str = str(raw_doc)
+    if re.search(r"<br\s*/?>|\r?\n", raw_str, re.IGNORECASE):
+        parts = [clean(p) for p in re.split(r"<br\s*/?>|\r?\n", raw_str, flags=re.IGNORECASE) if clean(p)]
+    else:
+        pattern = r"(?=(?:^|\s)(?:Сборник\s+\d+|Отдел\s+\d+|Раздел\s+\d+|Подраздел\s+\d+|Таблица\s+(?:(?:ГЭСН|ФЕР|ТЕР)\S*\s+)?\d+))"
+        chunks = [clean(p) for p in re.split(pattern, raw_str, flags=re.IGNORECASE) if clean(p)]
+        if len(chunks) <= 1:
+            chunks = [
+                clean(p)
+                for p in re.split(
+                    r"(?=(?:^|\s)(?:Сборник|Отдел|Раздел|Подраздел|Таблица)\s+)", raw_str, flags=re.IGNORECASE
+                )
+                if clean(p)
+            ]
+        parts = chunks if len(chunks) > 1 else ([clean(raw_str)] if clean(raw_str) else [])
+
+    collection, department, section, subsection, table = None, None, None, None, None
+    for p in parts:
+        pl = p.lower()
+        if pl.startswith("сборник") and not collection:
+            collection = p
+        elif pl.startswith("отдел") and not department:
+            department = p
+        elif pl.startswith("раздел") and not section:
+            section = p
+        elif pl.startswith("подраздел") and not subsection:
+            subsection = p
+        elif pl.startswith("таблица") and not table:
+            table = p
+
+    return {
+        "collection": collection,
+        "department": department,
+        "section": section,
+        "subsection": subsection,
+        "table": table,
+        "full_path": parts,
+    }
+
+
 def norm_cards(records):
     """Preserve every publication and every resource value, including non-numeric values."""
     cards = []
@@ -55,19 +106,39 @@ def norm_cards(records):
         values = array(record, "normTableValueTableJson")
         works = array(record, "normCatalogWorkTableJson")
         digest = hashlib.sha256(json.dumps(record, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        raw_doc = record.get("documentName") or record.get("name")
+        clean_doc = clean(raw_doc)
+        hierarchy = parse_hierarchy(raw_doc)
+        doc_guid = record.get("normLegalDocPublishedGuid")
+        rec_id = record.get("id")
+        raw_edition = record.get("edition")
+        edition_val = clean(raw_edition) if raw_edition else None
+        source_url = (
+            f"https://fgiscs.minstroyrf.ru/api/NormLegalDocFilePublished/GetByGuid/{doc_guid}"
+            if doc_guid
+            else None
+        )
         source = {
-            "record_id": record.get("id"),
-            "document": clean(record.get("documentName") or record.get("name")),
-            "document_guid": record.get("normLegalDocPublishedGuid"),
+            "record_id": rec_id,
+            "document": clean_doc,
+            "document_guid": doc_guid,
             "record_sha256": digest,
         }
         evidence = {
             "source": "online_api",
             "source_type": "SearchEstimatedRates",
-            "document": source["document"],
-            "document_guid": source["document_guid"],
-            "record_id": source["record_id"],
+            "document": clean_doc,
+            "document_guid": doc_guid,
+            "record_id": rec_id,
             "sha256": digest,
+        }
+        provenance = {
+            "source": "online_api",
+            "document_guid": doc_guid,
+            "source_url": source_url,
+            "edition": edition_val,
+            "sha256": digest,
+            "record_id": rec_id,
         }
         family = clean(record.get("documentTypeName"))
         by_code = {}
@@ -81,10 +152,17 @@ def norm_cards(records):
                 "family": family,
                 "name": clean(col.get("name") or col.get("Name")),
                 "unit": clean(col.get("meterName") or col.get("MeterName")),
+                "hierarchy": hierarchy,
                 "source": source,
                 "evidence": evidence,
+                "provenance": provenance,
+                "document_guid": doc_guid,
+                "record_id": rec_id,
+                "edition": edition_val,
                 "work_steps": [],
                 "resources": [],
+                "massa": None,
+                "special_indicators": [],
                 "warnings": [],
             }
         # Search may return one column but resource values for sibling norms. Retain those
@@ -111,10 +189,17 @@ def norm_cards(records):
                         "family": family,
                         "name": clean(quantity.get("NormName")),
                         "unit": None,
+                        "hierarchy": hierarchy,
                         "source": source,
                         "evidence": evidence,
+                        "provenance": provenance,
+                        "document_guid": doc_guid,
+                        "record_id": rec_id,
+                        "edition": edition_val,
                         "work_steps": [],
                         "resources": [],
+                        "massa": None,
+                        "special_indicators": [],
                         "warnings": ["Norm column absent in search response; unit unavailable"],
                     }
                 by_code[code]["resources"].append(
@@ -133,6 +218,28 @@ def norm_cards(records):
             code = code_text(work.get("NormNumber"))
             if code in by_code:
                 by_code[code]["work_steps"].append(clean(work.get("Name")))
+
+        for card in by_code.values():
+            spec_indicators = []
+            massa_indicator = None
+            for res in card["resources"]:
+                c_code = res.get("code") or ""
+                c_name = res.get("name") or ""
+                is_mass = c_code == "5-1" or "масса" in c_name.casefold()
+                is_special = is_mass or c_code.startswith("5-")
+                if is_special:
+                    item = {
+                        "code": c_code,
+                        "name": c_name,
+                        "unit": res.get("unit"),
+                        "value": res.get("quantity"),
+                    }
+                    spec_indicators.append(item)
+                    if is_mass and massa_indicator is None:
+                        massa_indicator = item
+            card["massa"] = massa_indicator
+            card["special_indicators"] = spec_indicators
+
         cards.extend(by_code.values())
     return cards
 
