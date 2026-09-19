@@ -182,7 +182,13 @@ class Service:
         card_b = card_b or records[-1]
         return compare_norms(card_a, card_b)
 
-    def norm_history(self, code: str, dataset_id: str | None = None, family: str | None = None):
+    def norm_history(
+        self,
+        code: str,
+        dataset_id: str | None = None,
+        family: str | None = None,
+        include_incomplete: bool = False,
+    ):
         if not dataset_id:
             datasets = self.datasets().get("items", [])
             for d in datasets:
@@ -197,7 +203,7 @@ class Service:
                 raise ValueError("No local datasets available. Build or specify a dataset_id.")
 
         data = Dataset(self.config.root, dataset_id)
-        return data.norm_history(code, family=family)
+        return data.norm_history(code, family=family, include_incomplete=include_incomplete)
 
     def compare_snapshots(
         self,
@@ -205,6 +211,7 @@ class Service:
         snapshot_b: str,
         dataset_id: str | None = None,
         family: str | None = None,
+        include_incomplete: bool = False,
     ):
         from .opendata_xml import compare_fsnb_editions
 
@@ -216,6 +223,12 @@ class Service:
 
         data = Dataset(self.config.root, dataset_id)
         with data.connect() as conn:
+            if not include_incomplete:
+                for snap in (snapshot_a, snapshot_b):
+                    row = conn.execute("SELECT status FROM snapshots WHERE snapshot_id=?", (snap,)).fetchone()
+                    if row and row[0] != "complete":
+                        raise ValueError(f"Snapshot {snap} is not complete (status: {row[0]})")
+
             query = "SELECT payload FROM norms WHERE norm_id LIKE ?"
             params_a = [f"{snapshot_a}:%"]
             params_b = [f"{snapshot_b}:%"]
@@ -243,7 +256,6 @@ class Service:
         dataset_id: str | None = None,
         snapshot_id: str | None = None,
     ):
-        import hashlib
         import uuid
         from pathlib import Path
 
@@ -270,15 +282,13 @@ class Service:
         reader = FsnbArchiveReader(path, snapshot_id=snapshot_id)
         snap_id = reader.snapshot_id
 
-        # Copy archive into raw for lossless provenance
-        raw_body = path.read_bytes()
-        raw_rel = data.raw(raw_body, "zip")
-        h = hashlib.sha256(raw_body).hexdigest()
+        # Copy archive into raw in 1 MiB chunks without loading full file into memory
+        raw_rel, h, file_size = data.raw_file(path, "zip")
 
         receipt = {
             "source_url": f"file://{path.name}",
             "sha256": h,
-            "bytes": len(raw_body),
+            "bytes": file_size,
             "fetched_at": now(),
             "request": {
                 "kind": "opendata_snapshot",
@@ -290,46 +300,98 @@ class Service:
             "xml_inventory": reader.inventory,
         }
 
-        # Stream norms in batches
-        norm_batch = []
-        total_norms = 0
-        for norm_card in reader.iter_norms():
-            norm_batch.append(norm_card)
-            if len(norm_batch) >= 1000:
-                data.add_norms(
-                    f"opendata:{snap_id}:norms:{total_norms}", norm_batch, receipt, save_receipt=False
-                )
-                total_norms += len(norm_batch)
-                norm_batch = []
-        if norm_batch:
-            data.add_norms(f"opendata:{snap_id}:norms:{total_norms}", norm_batch, receipt, save_receipt=False)
-            total_norms += len(norm_batch)
-
-        # Stream FSBC in batches
-        fsbc_batch = []
-        total_fsbc = 0
-        for fsbc_item in reader.iter_fsbc():
-            fsbc_batch.append(fsbc_item)
-            if len(fsbc_batch) >= 1000:
-                data.add_fsbc(
-                    f"opendata:{snap_id}:fsbc:{total_fsbc}", fsbc_batch, receipt, save_receipt=False
-                )
-                total_fsbc += len(fsbc_batch)
-                fsbc_batch = []
-        if fsbc_batch:
-            data.add_fsbc(f"opendata:{snap_id}:fsbc:{total_fsbc}", fsbc_batch, receipt, save_receipt=False)
-            total_fsbc += len(fsbc_batch)
-
         snapshot_meta = {
             "snapshot_id": snap_id,
             "dataset_number": "7707082071-fsnb",
             "file_name": path.name,
             "sha256": h,
-            "total_norms": total_norms,
-            "total_fsbc": total_fsbc,
+            "archive_size": file_size,
+            "approval_date": reader.approval_date,
+            "effective_from": reader.effective_from,
             "xml_files": reader.inventory,
         }
-        data.add_snapshot(snapshot_meta, receipt)
+        # Register snapshot in 'importing' status before parsing
+        data.register_snapshot(snapshot_meta, status="importing", receipt=receipt)
+
+        total_norms = 0
+        total_fsbc = 0
+        duplicate_norm_ids = 0
+        duplicate_fsbc_ids = 0
+
+        try:
+            # Stream norms in batches
+            norm_batch = []
+            seen_norm_ids = set()
+            for norm_card in reader.iter_norms():
+                nid = norm_card["norm_id"]
+                if nid in seen_norm_ids:
+                    duplicate_norm_ids += 1
+                seen_norm_ids.add(nid)
+                norm_batch.append(norm_card)
+                if len(norm_batch) >= 1000:
+                    data.add_norms(
+                        f"opendata:{snap_id}:norms:{total_norms}",
+                        norm_batch,
+                        receipt,
+                        save_receipt=False,
+                    )
+                    total_norms += len(norm_batch)
+                    norm_batch = []
+            if norm_batch:
+                data.add_norms(
+                    f"opendata:{snap_id}:norms:{total_norms}",
+                    norm_batch,
+                    receipt,
+                    save_receipt=False,
+                )
+                total_norms += len(norm_batch)
+
+            # Stream FSBC in batches
+            fsbc_batch = []
+            seen_fsbc_ids = set()
+            for fsbc_item in reader.iter_fsbc():
+                fid = fsbc_item["fsbc_id"]
+                if fid in seen_fsbc_ids:
+                    duplicate_fsbc_ids += 1
+                seen_fsbc_ids.add(fid)
+                fsbc_batch.append(fsbc_item)
+                if len(fsbc_batch) >= 1000:
+                    data.add_fsbc(
+                        f"opendata:{snap_id}:fsbc:{total_fsbc}",
+                        fsbc_batch,
+                        receipt,
+                        save_receipt=False,
+                    )
+                    total_fsbc += len(fsbc_batch)
+                    fsbc_batch = []
+            if fsbc_batch:
+                data.add_fsbc(
+                    f"opendata:{snap_id}:fsbc:{total_fsbc}",
+                    fsbc_batch,
+                    receipt,
+                    save_receipt=False,
+                )
+                total_fsbc += len(fsbc_batch)
+
+            proof = reader.evaluate_proof(
+                total_norms=total_norms,
+                total_fsbc=total_fsbc,
+                duplicate_norm_ids=duplicate_norm_ids,
+                duplicate_fsbc_ids=duplicate_fsbc_ids,
+            )
+            # Mark snapshot complete
+            data.finish_snapshot(
+                snap_id,
+                total_norms=total_norms,
+                total_fsbc=total_fsbc,
+                proof=proof,
+                status="complete",
+                approval_date=reader.approval_date,
+                effective_from=reader.effective_from,
+            )
+        except Exception as exc:
+            data.fail_snapshot(snap_id, error=str(exc))
+            raise
 
         return {
             "dataset_id": dataset_id,
@@ -338,7 +400,8 @@ class Service:
             "total_fsbc": total_fsbc,
             "xml_inventory": reader.inventory,
             "sha256": h,
-            "status": "imported",
+            "status": "complete",
+            "proof": proof,
         }
 
     def extract_coefficients(
@@ -368,7 +431,13 @@ class Service:
             "note": "Extracted coefficients preserve physical condition and note cells. Ambiguous rows are marked 'unresolved'.",
         }
 
-    def price_history(self, code: str, dataset_id: str | None = None, zone_id: int | None = None):
+    def price_history(
+        self,
+        code: str,
+        dataset_id: str | None = None,
+        zone_id: int | None = None,
+        include_incomplete: bool = False,
+    ):
         if not dataset_id:
             datasets = self.datasets().get("items", [])
             if not datasets:
@@ -378,7 +447,7 @@ class Service:
             dataset_id = datasets[0]["dataset_id"]
 
         data = Dataset(self.config.root, dataset_id)
-        return data.price_history(code, zone_id)
+        return data.price_history(code, zone_id, include_incomplete=include_incomplete)
 
     def verify_dataset(self, dataset_id: str):
         data = Dataset(self.config.root, dataset_id)

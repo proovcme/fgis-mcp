@@ -1,10 +1,14 @@
 from fgis_mcp.coverage import (
     PROOF_BOUNDED,
+    PROOF_COMPLETE_UNVERIFIED,
     PROOF_COMPLETE_VERIFIED,
+    PROOF_FAILED,
     PROOF_PARTIAL,
+    PROOF_UNKNOWN,
     STATUS_CAPTCHA_REQUIRED,
     STATUS_COMPLETE,
     STATUS_MANUAL,
+    STATUS_UNKNOWN,
     evaluate_coverage,
     source_capability,
 )
@@ -18,18 +22,46 @@ def test_source_capabilities_multi_dimensional():
     archive_cap = source_capability("archive_files")
     assert archive_cap["content_status"] == STATUS_CAPTCHA_REQUIRED
 
+    # Capabilities must NOT be a static verification proof
     registry_cap = source_capability("registry")
-    assert registry_cap["verification_status"] == PROOF_COMPLETE_VERIFIED
+    assert registry_cap["verification_status"] == PROOF_UNKNOWN
+    assert registry_cap["supported"] is True
+
+    # Unknown source by default has overall_status = unknown, verification_status = unknown
+    unknown_cap = source_capability("non_existent_source")
+    assert unknown_cap["overall_status"] == STATUS_UNKNOWN
+    assert unknown_cap["verification_status"] == PROOF_UNKNOWN
+    assert unknown_cap["supported"] is False
 
 
-def test_evaluate_coverage_all_succeeded():
+def test_evaluate_coverage_unverified_without_evidence():
+    """Successful traversal without closed-world proof evidence must be complete_unverified."""
+    tasks = [
+        {"kind": "catalog", "source": "fsnb2022"},
+        {"kind": "catalog", "source": "fsnb2022", "parent": "11111111-1111-4111-8111-111111111111"},
+    ]
+    receipts = [
+        {"request": tasks[0], "records": 5},
+        {"request": tasks[1], "records": 20},
+    ]
+    errors = []
+
+    res = evaluate_coverage(tasks, receipts, errors)
+    assert res["all_requested_tasks_succeeded"]
+    # Must NOT be complete_verified just because tasks succeeded
+    assert res["verification_proof"] == PROOF_COMPLETE_UNVERIFIED
+    assert res["sources"]["fsnb2022"]["proof"] == PROOF_COMPLETE_UNVERIFIED
+
+
+def test_evaluate_coverage_all_succeeded_with_evidence():
+    """Verified evidence (e.g. matching totalCount or explicit proof) yields complete_verified."""
     tasks = [
         {"kind": "catalog", "source": "registry"},
         {"kind": "catalog", "source": "registry", "section": 1, "page": 1},
     ]
     receipts = [
-        {"request": tasks[0], "records": 7},
-        {"request": tasks[1], "records": 100},
+        {"request": tasks[0], "records": 7, "total_count": 7},
+        {"request": tasks[1], "records": 100, "total_count": 100, "proof": PROOF_COMPLETE_VERIFIED},
     ]
     errors = []
 
@@ -128,3 +160,13 @@ def test_invariants_totalcount_with_duplicates_never_verified():
     )
     assert proof_clean["is_complete_verified"]
     assert proof_clean["proof"] == PROOF_COMPLETE_VERIFIED
+
+
+def test_invariants_all_failed_yields_failed():
+    tasks = [{"kind": "catalog", "source": "registry"}]
+    receipts = []
+    errors = [{"task": tasks[0], "code": "HTTP_500", "message": "Server error"}]
+
+    res = evaluate_coverage(tasks, receipts, errors)
+    assert res["sources"]["registry"]["proof"] == PROOF_FAILED
+    assert res["sources"]["registry"]["overall_status"] == "failed"

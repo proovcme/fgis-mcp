@@ -69,6 +69,8 @@ def main():
     parser.add_argument("--edition")
     parser.add_argument("--note")
     parser.add_argument("--output")
+    parser.add_argument("--opendata-version")
+    parser.add_argument("--include-incomplete", action="store_true")
     parser.add_argument("--format", action="append", choices=["jsonl", "parquet"])
     args = parser.parse_args()
     try:
@@ -105,6 +107,7 @@ def main():
                 sources=args.source,
                 include_archive=args.include_archive,
                 all_periods=args.all_periods,
+                opendata_version=args.opendata_version,
                 max_tasks=args.max_tasks,
             )
         elif args.command in {"job", "cancel", "resume"}:
@@ -137,7 +140,9 @@ def main():
         elif args.command == "norm-history":
             if not args.code:
                 parser.error("norm-history requires --code <norm_code>")
-            result = service.norm_history(args.code, dataset_id=args.id)
+            result = service.norm_history(
+                args.code, dataset_id=args.id, include_incomplete=args.include_incomplete
+            )
         elif args.command == "audit":
             from pathlib import Path
 

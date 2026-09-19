@@ -139,8 +139,9 @@ def test_parse_base_xml_stream():
     assert service_res["quantity"] == "П"  # by project
     assert service_res["service_type"] == "Н"  # unpriced
 
-    # Strict date extraction from explicit decree date
-    assert card["effective_from"] == "18.05.2022"
+    # Strict date extraction: decree date is approval_date, not effective_from
+    assert card["approval_date"] == "18.05.2022"
+    assert card["effective_from"] is None
 
 
 def test_parse_fsbc_xml_stream():
@@ -156,7 +157,8 @@ def test_parse_fsbc_xml_stream():
     assert item["book_code"] == "01"
     assert item["decree_number"] == "527/пр"
     assert item["decree_date"] == "12.08.2026"
-    assert item["effective_from"] == "12.08.2026"
+    assert item["approval_date"] == "12.08.2026"
+    assert item["effective_from"] is None
 
 
 def test_compare_norm_editions():

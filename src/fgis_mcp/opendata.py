@@ -68,7 +68,7 @@ def normalize_passport(raw: dict[str, Any], number: str) -> dict[str, Any]:
 
     for f in raw_files:
         if isinstance(f, dict):
-            file_url = clean(f.get("source") or f.get("url") or f.get("link") or "")
+            file_url = clean(f.get("source_url") or f.get("source") or f.get("url") or f.get("link") or "")
             file_format = clean(f.get("format") or "").upper()
             file_version = clean(f.get("version") or version)
             file_desc = clean(f.get("description") or "")
@@ -82,6 +82,7 @@ def normalize_passport(raw: dict[str, Any], number: str) -> dict[str, Any]:
                         "version": file_version,
                         "description": file_desc,
                         "date": file_date,
+                        "is_current": bool(f.get("is_current")),
                     }
                 )
 

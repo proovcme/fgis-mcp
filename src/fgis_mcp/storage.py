@@ -48,9 +48,10 @@ class Dataset:
             with self.connect() as conn:
                 conn.executescript("""
                     CREATE TABLE receipts (task_key TEXT PRIMARY KEY, payload TEXT NOT NULL);
-                    CREATE TABLE norms (norm_id TEXT PRIMARY KEY, code TEXT NOT NULL, family TEXT,
-                        name TEXT, search_text TEXT, payload TEXT NOT NULL);
+                    CREATE TABLE norms (norm_id TEXT PRIMARY KEY, code TEXT NOT NULL, snapshot_id TEXT,
+                        family TEXT, name TEXT, search_text TEXT, payload TEXT NOT NULL);
                     CREATE INDEX norm_code ON norms(code);
+                    CREATE INDEX norm_snapshot ON norms(snapshot_id);
                     CREATE TABLE prices (price_id TEXT PRIMARY KEY, code TEXT NOT NULL,
                         zone_id INTEGER, period_id INTEGER, search_text TEXT, payload TEXT NOT NULL);
                     CREATE INDEX price_code ON prices(code, zone_id, period_id);
@@ -61,7 +62,10 @@ class Dataset:
                         cost REAL, opt_cost REAL, search_text TEXT, payload TEXT NOT NULL);
                     CREATE INDEX fsbc_code ON fsbc(code, snapshot_id);
                     CREATE TABLE snapshots (snapshot_id TEXT PRIMARY KEY, dataset_number TEXT NOT NULL,
-                        decree TEXT, effective_from TEXT, file_name TEXT, sha256 TEXT, payload TEXT NOT NULL);
+                        decree TEXT, approval_date TEXT, effective_from TEXT, effective_to TEXT,
+                        file_name TEXT, sha256 TEXT, archive_size INTEGER, total_norms INTEGER,
+                        total_fsbc INTEGER, status TEXT NOT NULL DEFAULT 'complete', proof TEXT,
+                        payload TEXT NOT NULL);
                 """)
         elif not self.db.is_file():
             raise ValueError("Dataset not found")
@@ -78,6 +82,26 @@ class Dataset:
                 CREATE TABLE IF NOT EXISTS snapshots (snapshot_id TEXT PRIMARY KEY, dataset_number TEXT NOT NULL,
                     decree TEXT, effective_from TEXT, file_name TEXT, sha256 TEXT, payload TEXT NOT NULL);
             """)
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(norms)").fetchall()}
+            if "snapshot_id" not in cols:
+                conn.execute("ALTER TABLE norms ADD COLUMN snapshot_id TEXT")
+            conn.execute("CREATE INDEX IF NOT EXISTS norm_snapshot ON norms(snapshot_id)")
+
+            snap_cols = {row[1] for row in conn.execute("PRAGMA table_info(snapshots)").fetchall()}
+            if "status" not in snap_cols:
+                conn.execute("ALTER TABLE snapshots ADD COLUMN status TEXT NOT NULL DEFAULT 'complete'")
+            if "approval_date" not in snap_cols:
+                conn.execute("ALTER TABLE snapshots ADD COLUMN approval_date TEXT")
+            if "effective_to" not in snap_cols:
+                conn.execute("ALTER TABLE snapshots ADD COLUMN effective_to TEXT")
+            if "archive_size" not in snap_cols:
+                conn.execute("ALTER TABLE snapshots ADD COLUMN archive_size INTEGER")
+            if "total_norms" not in snap_cols:
+                conn.execute("ALTER TABLE snapshots ADD COLUMN total_norms INTEGER")
+            if "total_fsbc" not in snap_cols:
+                conn.execute("ALTER TABLE snapshots ADD COLUMN total_fsbc INTEGER")
+            if "proof" not in snap_cols:
+                conn.execute("ALTER TABLE snapshots ADD COLUMN proof TEXT")
 
     @contextmanager
     def connect(self):
@@ -97,6 +121,25 @@ class Dataset:
             tmp.replace(target)
         return str(target.relative_to(self.path))
 
+    def raw_file(self, src_path: Path | str, suffix: str) -> tuple[str, str, int]:
+        """Stream an external file into raw/ in 1 MiB chunks without reading the full file into memory."""
+        src = Path(src_path).resolve()
+        h = hashlib.sha256()
+        size = 0
+        with open(src, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+                size += len(chunk)
+        digest = h.hexdigest()
+        target = self.path / "raw" / f"{digest}.{suffix}"
+        if not target.exists():
+            tmp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+            with open(src, "rb") as f_in, open(tmp, "wb") as f_out:
+                for chunk in iter(lambda: f_in.read(1024 * 1024), b""):
+                    f_out.write(chunk)
+            tmp.replace(target)
+        return str(target.relative_to(self.path)), digest, size
+
     def receipt(self, task_key):
         with self.connect() as conn:
             row = conn.execute("SELECT payload FROM receipts WHERE task_key=?", (task_key,)).fetchone()
@@ -112,13 +155,19 @@ class Dataset:
         with self.connect() as conn:
             for card in cards:
                 card = {**card, "provenance": receipt}
+                snap_id = card.get("snapshot_id")
+                if not snap_id and isinstance(card.get("source"), dict):
+                    snap_id = card["source"].get("snapshot_id")
                 steps = card.get("work_steps") or []
                 text = " ".join([card.get("code", ""), card.get("name", ""), *steps]).casefold()
                 conn.execute(
-                    "INSERT OR IGNORE INTO norms VALUES(?,?,?,?,?,?)",
+                    """INSERT OR REPLACE INTO norms
+                    (norm_id, code, snapshot_id, family, name, search_text, payload)
+                    VALUES(?,?,?,?,?,?,?)""",
                     (
                         card["norm_id"],
                         card["code"],
+                        snap_id,
                         card.get("family"),
                         card.get("name", ""),
                         text,
@@ -126,7 +175,7 @@ class Dataset:
                     ),
                 )
             if save_receipt:
-                conn.execute("INSERT INTO receipts VALUES(?,?)", (task_key, dump(receipt)))
+                conn.execute("INSERT OR REPLACE INTO receipts VALUES(?,?)", (task_key, dump(receipt)))
 
     def add_fsbc(self, task_key, items, receipt, *, save_receipt=True):
         with self.connect() as conn:
@@ -134,7 +183,9 @@ class Dataset:
                 item = {**item, "provenance": receipt}
                 text = f"{item['code']} {item.get('name', '')}".casefold()
                 conn.execute(
-                    "INSERT OR IGNORE INTO fsbc VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    """INSERT OR REPLACE INTO fsbc
+                    (fsbc_id, code, snapshot_id, resource_type, name, unit, cost, opt_cost, search_text, payload)
+                    VALUES(?,?,?,?,?,?,?,?,?,?)""",
                     (
                         item["fsbc_id"],
                         item["code"],
@@ -149,25 +200,122 @@ class Dataset:
                     ),
                 )
             if save_receipt:
-                conn.execute("INSERT INTO receipts VALUES(?,?)", (task_key, dump(receipt)))
+                conn.execute("INSERT OR REPLACE INTO receipts VALUES(?,?)", (task_key, dump(receipt)))
 
-    def add_snapshot(self, snapshot_meta, receipt=None):
+    def register_snapshot(
+        self, snapshot_meta: dict, *, status: str = "importing", receipt: dict | None = None
+    ):
+        """Register or start a snapshot in the given lifecycle status (default 'importing')."""
         with self.connect() as conn:
             conn.execute(
-                "INSERT OR REPLACE INTO snapshots VALUES(?,?,?,?,?,?,?)",
+                """INSERT OR REPLACE INTO snapshots (
+                    snapshot_id, dataset_number, decree, approval_date, effective_from,
+                    effective_to, file_name, sha256, archive_size, total_norms, total_fsbc,
+                    status, proof, payload
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     snapshot_meta["snapshot_id"],
                     snapshot_meta.get("dataset_number", "7707082071-fsnb"),
                     snapshot_meta.get("decree", ""),
+                    snapshot_meta.get("approval_date"),
                     snapshot_meta.get("effective_from"),
+                    snapshot_meta.get("effective_to"),
                     snapshot_meta.get("file_name", ""),
                     snapshot_meta.get("sha256", ""),
-                    dump(snapshot_meta),
+                    snapshot_meta.get("archive_size") or snapshot_meta.get("bytes"),
+                    snapshot_meta.get("total_norms", 0),
+                    snapshot_meta.get("total_fsbc", 0),
+                    status,
+                    dump(snapshot_meta.get("proof")) if snapshot_meta.get("proof") else None,
+                    dump({**snapshot_meta, "status": status}),
                 ),
             )
             if receipt:
                 task_key = f"snapshot:{snapshot_meta['snapshot_id']}"
                 conn.execute("INSERT OR REPLACE INTO receipts VALUES(?,?)", (task_key, dump(receipt)))
+
+    def finish_snapshot(
+        self,
+        snapshot_id: str,
+        *,
+        total_norms: int,
+        total_fsbc: int,
+        proof: dict,
+        status: str = "complete",
+        **extra,
+    ):
+        """Mark a snapshot as complete, persisting counts, proof, and full metadata."""
+        with self.connect() as conn:
+            row = conn.execute("SELECT payload FROM snapshots WHERE snapshot_id=?", (snapshot_id,)).fetchone()
+            existing = json.loads(row[0]) if row else {}
+            updated = {
+                **existing,
+                **extra,
+                "snapshot_id": snapshot_id,
+                "status": status,
+                "total_norms": total_norms,
+                "total_fsbc": total_fsbc,
+                "proof": proof,
+                "updated_at": now(),
+            }
+            conn.execute(
+                """UPDATE snapshots SET
+                    status=?,
+                    total_norms=?,
+                    total_fsbc=?,
+                    proof=?,
+                    approval_date=?,
+                    effective_from=?,
+                    effective_to=?,
+                    payload=?
+                WHERE snapshot_id=?""",
+                (
+                    status,
+                    total_norms,
+                    total_fsbc,
+                    dump(proof),
+                    updated.get("approval_date"),
+                    updated.get("effective_from"),
+                    updated.get("effective_to"),
+                    dump(updated),
+                    snapshot_id,
+                ),
+            )
+
+    def fail_snapshot(
+        self,
+        snapshot_id: str,
+        *,
+        error: str,
+        proof: dict | None = None,
+    ):
+        """Mark a snapshot as failed on error with diagnostic details."""
+        with self.connect() as conn:
+            row = conn.execute("SELECT payload FROM snapshots WHERE snapshot_id=?", (snapshot_id,)).fetchone()
+            existing = json.loads(row[0]) if row else {}
+            updated = {
+                **existing,
+                "snapshot_id": snapshot_id,
+                "status": "failed",
+                "error": error,
+                "proof": proof or {},
+                "failed_at": now(),
+            }
+            conn.execute(
+                """UPDATE snapshots SET
+                    status='failed',
+                    proof=?,
+                    payload=?
+                WHERE snapshot_id=?""",
+                (
+                    dump(proof or {}),
+                    dump(updated),
+                    snapshot_id,
+                ),
+            )
+
+    def add_snapshot(self, snapshot_meta, receipt=None):
+        self.register_snapshot(snapshot_meta, status=snapshot_meta.get("status", "complete"), receipt=receipt)
 
     def add_prices(self, task_key, rows, receipt, zone_id, period_id):
         count = 0
@@ -270,22 +418,29 @@ class Dataset:
             "items": items,
         }
 
-    def norm_history(self, code: str, family: str | None = None) -> dict:
+    def norm_history(self, code: str, family: str | None = None, include_incomplete: bool = False) -> dict:
         """Retrieve all historical editions of a norm across all imported snapshots with transition diffs."""
         from .opendata_xml import compare_norm_editions
 
-        clauses = ["code=?"]
+        clauses = ["n.code=?"]
         params = [code]
         if family:
-            clauses.append("family=?")
+            clauses.append("n.family=?")
             params.append(family)
+        if not include_incomplete:
+            clauses.append("(s.status = 'complete' OR s.status IS NULL)")
         where = " WHERE " + " AND ".join(clauses)
 
+        query = f"""
+            SELECT n.payload, s.status, s.file_name, s.sha256, s.approval_date, s.effective_from, s.payload
+            FROM norms n
+            LEFT JOIN snapshots s ON n.snapshot_id = s.snapshot_id
+            {where}
+            ORDER BY n.norm_id ASC
+        """
+
         with self.connect() as conn:
-            rows = conn.execute(
-                f"SELECT payload FROM norms {where} ORDER BY norm_id ASC",
-                params,
-            ).fetchall()
+            rows = conn.execute(query, params).fetchall()
         if not rows:
             return {
                 "dataset_id": self.id,
@@ -295,7 +450,50 @@ class Dataset:
                 "editions": [],
                 "transitions": [],
             }
-        records = [json.loads(r[0]) for r in rows]
+        records = []
+        for r in rows:
+            card = json.loads(r[0])
+            snap_status = r[1] or "complete"
+            snap_filename = r[2] or ""
+            snap_sha256 = r[3] or ""
+            snap_approval = r[4]
+            snap_effective = r[5]
+            snap_payload = json.loads(r[6]) if r[6] else {}
+
+            card_src = card.get("source") if isinstance(card.get("source"), dict) else {}
+            snap_id = card.get("snapshot_id") or card_src.get("snapshot_id") or ""
+
+            provenance = {
+                "snapshot_id": snap_id,
+                "snapshot_status": snap_status,
+                "archive_filename": snap_filename or snap_payload.get("file_name", ""),
+                "archive_sha256": snap_sha256 or snap_payload.get("sha256", ""),
+                "xml_filename": card.get("xml_filename")
+                or card_src.get("xml_filename")
+                or card_src.get("xml_file", ""),
+                "xml_sha256": card.get("xml_sha256") or card_src.get("xml_sha256", ""),
+                "approval_date": card.get("approval_date")
+                or snap_approval
+                or snap_payload.get("approval_date"),
+                "effective_from": card.get("effective_from")
+                or snap_effective
+                or snap_payload.get("effective_from"),
+                "source_url": snap_payload.get("source_url")
+                or snap_payload.get("url")
+                or card_src.get("source_url", ""),
+                "guid": snap_payload.get("guid")
+                or snap_payload.get("file_guid")
+                or card_src.get("document_guid", ""),
+            }
+            card["snapshot_provenance"] = provenance
+            if not card.get("approval_date") and provenance["approval_date"]:
+                card["approval_date"] = provenance["approval_date"]
+            if not card.get("effective_from") and provenance["effective_from"]:
+                card["effective_from"] = provenance["effective_from"]
+            if not card.get("snapshot_id") and snap_id:
+                card["snapshot_id"] = snap_id
+            records.append(card)
+
         # Group by family so transitions only compare identical families across snapshots
         by_family: dict[str, list[dict]] = {}
         for rec in records:
@@ -330,22 +528,28 @@ class Dataset:
         snapshot_id_1: str,
         snapshot_id_2: str,
         family: str | None = None,
+        include_incomplete: bool = False,
     ) -> dict:
         """Compare two specific snapshot editions of a norm with structured diff."""
         from .opendata_xml import compare_norm_editions
 
-        clauses = ["code=?"]
+        clauses = ["n.code=?"]
         params = [code]
         if family:
-            clauses.append("family=?")
+            clauses.append("n.family=?")
             params.append(family)
+        if not include_incomplete:
+            clauses.append("(s.status = 'complete' OR s.status IS NULL)")
         where = " WHERE " + " AND ".join(clauses)
 
+        query = f"""
+            SELECT n.payload FROM norms n
+            LEFT JOIN snapshots s ON n.snapshot_id = s.snapshot_id
+            {where}
+        """
+
         with self.connect() as conn:
-            rows = conn.execute(
-                f"SELECT payload FROM norms {where}",
-                params,
-            ).fetchall()
+            rows = conn.execute(query, params).fetchall()
         editions = [json.loads(r[0]) for r in rows]
 
         def matches_snapshot(item: dict, snap: str) -> bool:
@@ -365,35 +569,46 @@ class Dataset:
                 missing.append(snapshot_id_1)
             if card2 is None:
                 missing.append(snapshot_id_2)
-            raise ValueError(f"Edition not found for norm {code} in snapshot(s): {', '.join(missing)}")
+            raise ValueError(
+                f"Edition not found for norm {code} in completed snapshot(s): {', '.join(missing)}"
+            )
 
         return compare_norm_editions(card1, card2)
 
-    def list_snapshots(self) -> list[dict]:
-        """List all imported OpenData snapshots with entity counts."""
+    def list_snapshots(self, include_incomplete: bool = True) -> list[dict]:
+        """List all imported OpenData snapshots with entity counts, status, and proof."""
         snapshots = []
+        where = "" if include_incomplete else "WHERE status = 'complete'"
         with self.connect() as conn:
             s_rows = conn.execute(
-                "SELECT snapshot_id, payload FROM snapshots ORDER BY snapshot_id ASC"
+                f"""SELECT snapshot_id, payload, status, total_norms, total_fsbc, proof
+                FROM snapshots {where} ORDER BY snapshot_id ASC"""
             ).fetchall()
-            for s_id, payload_str in s_rows:
+            for s_id, payload_str, status_val, total_n, total_f, proof_str in s_rows:
                 meta = json.loads(payload_str)
-                norm_count = conn.execute(
-                    "SELECT count(*) FROM norms WHERE norm_id LIKE ?", (f"{s_id}:%",)
-                ).fetchone()[0]
-                fsbc_count = conn.execute(
-                    "SELECT count(*) FROM fsbc WHERE snapshot_id=?", (s_id,)
-                ).fetchone()[0]
+                norm_count = (
+                    total_n
+                    if total_n
+                    else conn.execute("SELECT count(*) FROM norms WHERE snapshot_id=?", (s_id,)).fetchone()[0]
+                )
+                fsbc_count = (
+                    total_f
+                    if total_f
+                    else conn.execute("SELECT count(*) FROM fsbc WHERE snapshot_id=?", (s_id,)).fetchone()[0]
+                )
+                proof_data = json.loads(proof_str) if proof_str else meta.get("proof")
                 snapshots.append(
                     {
                         **meta,
+                        "status": status_val or meta.get("status", "complete"),
                         "norm_count": norm_count,
                         "fsbc_count": fsbc_count,
+                        "proof": proof_data,
                     }
                 )
         return snapshots
 
-    def price_history(self, code: str, zone_id: int | None = None):
+    def price_history(self, code: str, zone_id: int | None = None, include_incomplete: bool = False):
         """Retrieve price history across all available periods for a resource code, including base FSBC costs."""
         clauses = ["code=?"]
         params = [code]
@@ -405,8 +620,17 @@ class Dataset:
         base_records = []
         with self.connect() as conn:
             # Check FSBC base prices first
+            fsbc_where = "WHERE f.code=?"
+            if not include_incomplete:
+                fsbc_where += " AND (s.status = 'complete' OR s.status IS NULL)"
             fsbc_rows = conn.execute(
-                "SELECT payload, snapshot_id FROM fsbc WHERE code=? ORDER BY snapshot_id ASC",
+                f"""
+                SELECT f.payload, f.snapshot_id, s.status
+                FROM fsbc f
+                LEFT JOIN snapshots s ON f.snapshot_id = s.snapshot_id
+                {fsbc_where}
+                ORDER BY f.snapshot_id ASC
+                """,
                 (code,),
             ).fetchall()
             for f_row in fsbc_rows:
@@ -416,6 +640,7 @@ class Dataset:
                         "period_id": 0,
                         "zone_id": 0,
                         "snapshot_id": f_row[1],
+                        "snapshot_status": f_row[2] or "complete",
                         "code": item.get("code"),
                         "name": item.get("name"),
                         "unit": item.get("unit"),

@@ -110,7 +110,7 @@ def guid(value):
     return str(parsed)
 
 
-def task_roots(sources, include_archive=False, all_periods=False):
+def task_roots(sources, include_archive=False, all_periods=False, opendata_version=None):
     if sources == ["all_public"]:
         sources = ALL_SOURCES
     if not sources or any(s not in ALL_SOURCES for s in sources):
@@ -126,7 +126,8 @@ def task_roots(sources, include_archive=False, all_periods=False):
                         "kind": "catalog",
                         "source": "opendata",
                         "dataset_number": num,
-                        **({"include_archive": True} if include_archive else {}),
+                        **({"include_archive": True} if include_archive or opendata_version else {}),
+                        **({"opendata_version": str(opendata_version)} if opendata_version else {}),
                     }
                 )
             continue
@@ -324,14 +325,26 @@ def children(payload, task):
         else:
             out.extend({**task, "region_id": r["id"]} for r in rows)
     elif source == "opendata":
-        from . import opendata
+        from . import opendata, opendata_xml
 
         if "dataset_number" not in task:
             out.extend({**task, "dataset_number": num} for num in opendata.KNOWN_OPENDATA_DATASETS)
         else:
             passport = opendata.normalize_passport(payload, task["dataset_number"])
             all_files = passport.get("files", [])
-            if not task.get("include_archive"):
+            target_version = task.get("opendata_version")
+            if target_version:
+                tv = str(target_version).strip().casefold()
+                selected_files = []
+                for f in all_files:
+                    fname = str(f.get("name", "")).casefold()
+                    furl = str(f.get("source_url", "")).casefold()
+                    snap = opendata_xml.extract_snapshot_id(fname or furl).casefold()
+                    if tv in fname or tv in furl or tv == snap:
+                        selected_files.append(f)
+                if not selected_files:
+                    selected_files = [f for f in all_files if tv in str(f.get("source_url", "")).casefold()]
+            elif not task.get("include_archive"):
                 selected_files = [f for f in all_files if f.get("is_current")] or all_files[:1]
             else:
                 selected_files = all_files

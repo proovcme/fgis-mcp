@@ -1,6 +1,5 @@
 """Manual import pipeline for external TER files, official archives and manual datasets."""
 
-import hashlib
 import json
 import zipfile
 from pathlib import Path
@@ -28,16 +27,13 @@ def import_manual_file(
         raise ValueError(f"File not found: {path}")
 
     data = Dataset(root, dataset_id)
-    body = path.read_bytes()
-    digest = hashlib.sha256(body).hexdigest()
     suffix = path.suffix.lstrip(".").lower() or "bin"
-
-    raw_rel = data.raw(body, suffix)
+    raw_rel, digest, file_size = data.raw_file(path, suffix)
     receipt = {
         "source_url": f"manual://{path.name}",
         "sha256": digest,
         "route": "manual_import",
-        "bytes": len(body),
+        "bytes": file_size,
         "fetched_at": now(),
         "request": {
             "kind": "manual_import",
@@ -66,7 +62,8 @@ def import_manual_file(
 
     if imported_type == "unknown" and suffix == "json":
         try:
-            parsed = json.loads(body.decode("utf-8"))
+            with open(path, "r", encoding="utf-8") as f:
+                parsed = json.load(f)
             if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
                 if any("normTableJson" in r for r in parsed):
                     try:
@@ -88,7 +85,7 @@ def import_manual_file(
         doc_payload = {
             "name": path.name,
             "file": raw_rel,
-            "size": len(body),
+            "size": file_size,
             "sha256": digest,
             "edition": edition,
             "note": note,

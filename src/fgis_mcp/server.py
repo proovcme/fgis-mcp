@@ -150,13 +150,15 @@ def create_server(config):
         sources: list[str] | None = None,
         include_archive: bool = False,
         all_periods: bool = False,
+        opendata_version: str | None = None,
         max_tasks: int = 25000,
     ) -> dict:
         """Start durable download. Explicit queries, collection prefixes (each scans 01..99),
         price_books [{zone_id,period_id}]. No automatic all-Russia/history download.
         sources from fgis_sources traverses actual catalogues and downloads documents with technical parts.
         ['all_public'] selects all adapters; include_archive adds archived legal trees; all_periods includes
-        historical split forms (large). max_tasks bounds traversal; bounded jobs retain pending tasks.
+        historical split forms (large); opendata_version downloads only the specified FSNB snapshot/GUID/filename.
+        max_tasks bounds traversal; bounded jobs retain pending tasks.
         TER registry is not TER table content; bulk archive files require interactive portal CAPTCHA.
         Search enumeration cannot establish exhaustive FSNB coverage. Returns job/dataset ID.
         """
@@ -168,6 +170,7 @@ def create_server(config):
             sources=sources,
             include_archive=include_archive,
             all_periods=all_periods,
+            opendata_version=opendata_version,
             max_tasks=max_tasks,
         )
 
@@ -244,9 +247,14 @@ def create_server(config):
         return service.extract_coefficients(document_guid, source, table_index)
 
     @server.tool(annotations=read)
-    def fgis_price_history(code: str, dataset_id: str | None = None, zone_id: int | None = None) -> dict:
+    def fgis_price_history(
+        code: str,
+        dataset_id: str | None = None,
+        zone_id: int | None = None,
+        include_incomplete: bool = False,
+    ) -> dict:
         """Query resource price timeline across all available periods in a dataset."""
-        return service.price_history(code, dataset_id, zone_id)
+        return service.price_history(code, dataset_id, zone_id, include_incomplete=include_incomplete)
 
     @server.tool(annotations=local)
     def fgis_verify_dataset(dataset_id: str) -> dict:
@@ -269,9 +277,10 @@ def create_server(config):
         code: str,
         dataset_id: str | None = None,
         family: str | None = None,
+        include_incomplete: bool = False,
     ) -> dict:
         """Retrieve complete historical editions of a norm across all imported snapshots with transition diffs."""
-        return service.norm_history(code, dataset_id, family=family)
+        return service.norm_history(code, dataset_id, family=family, include_incomplete=include_incomplete)
 
     @server.tool(annotations=read)
     def fgis_compare_snapshots(
@@ -279,9 +288,12 @@ def create_server(config):
         snapshot_b: str,
         dataset_id: str | None = None,
         family: str | None = None,
+        include_incomplete: bool = False,
     ) -> dict:
         """Compare two entire FSNB editions in a dataset: counts of added, removed, modified, and identical norms."""
-        return service.compare_snapshots(snapshot_a, snapshot_b, dataset_id, family)
+        return service.compare_snapshots(
+            snapshot_a, snapshot_b, dataset_id, family, include_incomplete=include_incomplete
+        )
 
     @server.tool(annotations=write)
     def fgis_import_opendata(

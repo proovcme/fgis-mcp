@@ -27,6 +27,80 @@ XML_FSBC_FILES = {
 
 ALL_KNOWN_XML = {**XML_NORM_FAMILIES, **XML_FSBC_FILES}
 
+EXPECTED_FSNB_2022_XML = [
+    "ГЭСН.xml",
+    "ГЭСНм.xml",
+    "ГЭСНр.xml",
+    "ГЭСНп.xml",
+    "ГЭСНмр.xml",
+    "ФСБЦ_Мат&Оборуд.xml",
+    "ФСБЦ_Маш.xml",
+]
+
+
+def decode_zip_filename(raw_name: str) -> str:
+    """Decode zip filename handling Windows CP866 encoding when UTF-8 flag is absent."""
+    try:
+        return raw_name.encode("cp437").decode("cp866")
+    except Exception:
+        return raw_name
+
+
+def extract_dates(text: str) -> dict[str, str | None]:
+    """Extract approval_date, effective_from, and effective_to strictly from explicit legal text.
+
+    Rules:
+    - approval_date: date of decree or approving act, e.g. 'от 18.05.2022'.
+    - effective_from: ONLY when explicitly stated: 'действует с DD.MM.YYYY',
+      'вступает в силу с DD.MM.YYYY', 'вводится в действие с DD.MM.YYYY'.
+    - effective_to: ONLY when explicitly stated: 'действует по DD.MM.YYYY',
+      'действует до DD.MM.YYYY', 'утратил силу с DD.MM.YYYY'.
+    - Never infer effective_from from approval_date!
+    """
+    approval_date = None
+    effective_from = None
+    effective_to = None
+
+    if not text:
+        return {
+            "approval_date": None,
+            "effective_from": None,
+            "effective_to": None,
+        }
+
+    # Match approval date: 'от DD.MM.YYYY'
+    app_match = re.search(r"\bот\s+(\d{2}\.\d{2}\.\d{4})\b", text, re.IGNORECASE)
+    if not app_match:
+        app_match = re.search(
+            r"(?:приказ|акта?|письм[оа])\s+.*?от\s+(\d{2}\.\d{2}\.\d{4})", text, re.IGNORECASE
+        )
+    if app_match:
+        approval_date = app_match.group(1)
+
+    # Match effective_from: strictly 'действует с ...' or 'вступает в силу с ...' or 'вводится в действие с ...'
+    eff_match = re.search(
+        r"(?:действует|вступает\s+в\s+силу|вводится\s+в\s+действие)\s+с\s+(\d{2}\.\d{2}\.\d{4})",
+        text,
+        re.IGNORECASE,
+    )
+    if eff_match:
+        effective_from = eff_match.group(1)
+
+    # Match effective_to: 'действует (по|до) ...' or 'утратил силу с ...'
+    to_match = re.search(
+        r"(?:действует\s+(?:по|до)|утратил\s+силу\s+с)\s+(\d{2}\.\d{2}\.\d{4})",
+        text,
+        re.IGNORECASE,
+    )
+    if to_match:
+        effective_to = to_match.group(1)
+
+    return {
+        "approval_date": approval_date,
+        "effective_from": effective_from,
+        "effective_to": effective_to,
+    }
+
 
 def check_zip_safety(
     archive: zipfile.ZipFile,
@@ -75,6 +149,10 @@ def parse_base_xml_stream(
     snapshot_id: str,
     family: str | None = None,
     decree_override: str | None = None,
+    effective_from_override: str | None = None,
+    approval_date_override: str | None = None,
+    xml_filename: str | None = None,
+    xml_sha256: str | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Stream parse a GOSN/GESN base XML file yielding normalized norm cards.
 
@@ -202,11 +280,12 @@ def parse_base_xml_stream(
 
                 decree_text = decree_override or ("; ".join(current_decrees) if current_decrees else "")
 
-                # Invariant: strict date extraction only from explicit decree/act text
-                effective_date = None
-                date_match = re.search(r"(?:от|с)\s+(\d{2}\.\d{2}\.\d{4})", decree_text)
-                if date_match:
-                    effective_date = date_match.group(1)
+                # Invariant: strict legal date extraction
+                extracted_dates = extract_dates(decree_text)
+                approval_date = extracted_dates["approval_date"] or approval_date_override
+                effective_from = extracted_dates["effective_from"] or effective_from_override
+                effective_to = extracted_dates["effective_to"]
+                pub_date = creation_date or None
 
                 card = {
                     "norm_id": f"{snapshot_id}:{eff_family}:{code}",
@@ -227,11 +306,18 @@ def parse_base_xml_stream(
                     "snapshot_id": snapshot_id,
                     "base_level": base_price_level,
                     "decree": decree_text,
-                    "effective_from": effective_date,
+                    "approval_date": approval_date,
+                    "publication_date": pub_date,
+                    "effective_from": effective_from,
+                    "effective_to": effective_to,
+                    "xml_filename": xml_filename or f"{eff_family}.xml",
+                    "xml_sha256": xml_sha256,
                     "source": {
                         "dataset_number": "7707082071-fsnb",
                         "snapshot_id": snapshot_id,
-                        "xml_file": f"{eff_family}.xml",
+                        "xml_file": xml_filename or f"{eff_family}.xml",
+                        "xml_filename": xml_filename or f"{eff_family}.xml",
+                        "xml_sha256": xml_sha256,
                     },
                     "raw_metadata": {
                         "base_name": base_name,
@@ -255,6 +341,10 @@ def parse_fsbc_xml_stream(
     stream: io.BufferedIOBase | BinaryIO,
     snapshot_id: str,
     resource_type: str | None = None,
+    effective_from_override: str | None = None,
+    approval_date_override: str | None = None,
+    xml_filename: str | None = None,
+    xml_sha256: str | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Stream parse an FSBC catalog XML file yielding normalized base resource items.
 
@@ -332,6 +422,8 @@ def parse_fsbc_xml_stream(
                         group_code = s["code"]
                         group_name = s["name"]
 
+                app_date = approving_act_date or approval_date_override or None
+
                 entry = {
                     "fsbc_id": f"{snapshot_id}:{code}",
                     "code": code,
@@ -348,12 +440,23 @@ def parse_fsbc_xml_stream(
                     "group_name": group_name,
                     "decree_number": approving_act_number,
                     "decree_date": approving_act_date,
+                    "approval_date": app_date,
+                    "publication_date": None,
+                    "effective_from": effective_from_override,
+                    "effective_to": None,
                     "snapshot_id": snapshot_id,
-                    "effective_from": approving_act_date or None,
+                    "xml_filename": xml_filename
+                    or ("ФСБЦ_Маш.xml" if eff_type == "machine" else "ФСБЦ_Мат&Оборуд.xml"),
+                    "xml_sha256": xml_sha256,
                     "source": {
                         "dataset_number": "7707082071-fsnb",
                         "snapshot_id": snapshot_id,
                         "resource_type": eff_type,
+                        "xml_file": xml_filename
+                        or ("ФСБЦ_Маш.xml" if eff_type == "machine" else "ФСБЦ_Мат&Оборуд.xml"),
+                        "xml_filename": xml_filename
+                        or ("ФСБЦ_Маш.xml" if eff_type == "machine" else "ФСБЦ_Мат&Оборуд.xml"),
+                        "xml_sha256": xml_sha256,
                     },
                 }
                 elem.clear()
@@ -375,23 +478,48 @@ class FsnbArchiveReader:
         if not self.zip_path.is_file():
             raise FileNotFoundError(f"FSNB archive file not found: {zip_path}")
         self.snapshot_id = snapshot_id or extract_snapshot_id(self.zip_path.name)
+        self.archive_sha256 = self._calculate_archive_sha256()
+        self.approval_date: str | None = None
+        self.effective_from: str | None = None
+        self.effective_to: str | None = None
         self._xml_inventory: dict[str, dict[str, Any]] = {}
+        self._parsed_xml: set[str] = set()
+        self._failed_xml: set[str] = set()
+        self.parser_errors: list[str] = []
         self._inspect()
+
+    def _calculate_archive_sha256(self) -> str:
+        """Stream calculate archive SHA-256 in 1 MiB chunks without loading file into RAM."""
+        h = hashlib.sha256()
+        with self.zip_path.open("rb") as f:
+            while chunk := f.read(1024 * 1024):
+                h.update(chunk)
+        return h.hexdigest()
 
     def _inspect(self) -> None:
         with zipfile.ZipFile(self.zip_path) as archive:
             check_zip_safety(archive)
-            if not re.fullmatch(r"\d{8}", self.snapshot_id):
-                for info in archive.infolist():
-                    cand = extract_snapshot_id(info.filename)
+
+            # Scan internal paths (with CP866 fallback) for dates and snapshot ID
+            for info in archive.infolist():
+                decoded_name = decode_zip_filename(info.filename)
+                dates = extract_dates(decoded_name)
+                if dates["approval_date"] and not self.approval_date:
+                    self.approval_date = dates["approval_date"]
+                if dates["effective_from"] and not self.effective_from:
+                    self.effective_from = dates["effective_from"]
+                if dates["effective_to"] and not self.effective_to:
+                    self.effective_to = dates["effective_to"]
+
+                if not re.fullmatch(r"\d{8}", self.snapshot_id):
+                    cand = extract_snapshot_id(decoded_name)
                     if re.fullmatch(r"\d{8}", cand):
                         self.snapshot_id = cand
-                        break
 
             for info in archive.infolist():
                 base_name = Path(info.filename).name
                 if base_name in ALL_KNOWN_XML:
-                    # Calculate SHA-256 of the internal XML for provenance
+                    # Calculate SHA-256 of the internal XML for provenance in 1 MiB chunks
                     with archive.open(info.filename) as stream:
                         h = hashlib.sha256()
                         while chunk := stream.read(1024 * 1024):
@@ -402,6 +530,22 @@ class FsnbArchiveReader:
                         "sha256": h.hexdigest(),
                         "type": "norm" if base_name in XML_NORM_FAMILIES else "fsbc",
                     }
+
+            # If approval date was not in folder paths, inspect decree headers of XML files
+            if not self.approval_date:
+                for base in ("ФСБЦ_Мат&Оборуд.xml", "ГЭСН.xml"):
+                    if base in self._xml_inventory:
+                        path_in_zip = self._xml_inventory[base]["internal_path"]
+                        with archive.open(path_in_zip) as f:
+                            head = f.read(4096).decode("utf-8", errors="ignore")
+                            m_date = re.search(r"<ApprovingActDate>(.*?)</ApprovingActDate>", head)
+                            if m_date and m_date.group(1).strip():
+                                self.approval_date = m_date.group(1).strip()
+                                break
+                            dates = extract_dates(head)
+                            if dates.get("approval_date"):
+                                self.approval_date = dates["approval_date"]
+                                break
 
     @property
     def inventory(self) -> dict[str, dict[str, Any]]:
@@ -416,8 +560,23 @@ class FsnbArchiveReader:
                 if base_name not in self._xml_inventory:
                     continue
                 internal_path = self._xml_inventory[base_name]["internal_path"]
-                with archive.open(internal_path) as stream:
-                    yield from parse_base_xml_stream(stream, snapshot_id=self.snapshot_id, family=family_name)
+                xml_sha = self._xml_inventory[base_name].get("sha256")
+                try:
+                    with archive.open(internal_path) as stream:
+                        yield from parse_base_xml_stream(
+                            stream,
+                            snapshot_id=self.snapshot_id,
+                            family=family_name,
+                            effective_from_override=self.effective_from,
+                            approval_date_override=self.approval_date,
+                            xml_filename=base_name,
+                            xml_sha256=xml_sha,
+                        )
+                    self._parsed_xml.add(base_name)
+                except Exception as exc:
+                    self._failed_xml.add(base_name)
+                    self.parser_errors.append(f"{base_name}: {exc}")
+                    raise
 
     def iter_fsbc(self, resource_types: list[str] | None = None) -> Iterator[dict[str, Any]]:
         """Yield normalized FSBC base resources across catalog XML files in the archive."""
@@ -428,10 +587,79 @@ class FsnbArchiveReader:
                 if base_name not in self._xml_inventory:
                     continue
                 internal_path = self._xml_inventory[base_name]["internal_path"]
-                with archive.open(internal_path) as stream:
-                    yield from parse_fsbc_xml_stream(
-                        stream, snapshot_id=self.snapshot_id, resource_type=res_type
-                    )
+                xml_sha = self._xml_inventory[base_name].get("sha256")
+                try:
+                    with archive.open(internal_path) as stream:
+                        yield from parse_fsbc_xml_stream(
+                            stream,
+                            snapshot_id=self.snapshot_id,
+                            resource_type=res_type,
+                            effective_from_override=self.effective_from,
+                            approval_date_override=self.approval_date,
+                            xml_filename=base_name,
+                            xml_sha256=xml_sha,
+                        )
+                    self._parsed_xml.add(base_name)
+                except Exception as exc:
+                    self._failed_xml.add(base_name)
+                    self.parser_errors.append(f"{base_name}: {exc}")
+                    raise
+
+    def evaluate_proof(
+        self,
+        total_norms: int,
+        total_fsbc: int,
+        duplicate_norm_ids: int = 0,
+        duplicate_fsbc_ids: int = 0,
+        parser_errors: list[str] | None = None,
+        expected_xml: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Compute strict completeness proof for this snapshot archive."""
+        expected = expected_xml or EXPECTED_FSNB_2022_XML
+        found = sorted(list(self._xml_inventory.keys()))
+        missing = [f for f in expected if f not in self._xml_inventory]
+        errors = list(self.parser_errors) + (parser_errors or [])
+        failed = sorted(list(self._failed_xml))
+
+        is_fsnb_standard = set(expected) == set(EXPECTED_FSNB_2022_XML)
+
+        if missing:
+            proof = "partial"
+            status = "failed" if (total_norms == 0 and total_fsbc == 0) else "partial"
+        elif errors or failed or duplicate_norm_ids > 0 or duplicate_fsbc_ids > 0:
+            proof = "partial"
+            status = "failed"
+        elif total_norms > 0 and total_fsbc > 0 and not missing and not failed:
+            proof = "complete_verified" if is_fsnb_standard else "complete_unverified"
+            status = "complete"
+        elif total_norms > 0 or total_fsbc > 0:
+            proof = "complete_unverified"
+            status = "complete"
+        else:
+            proof = "unknown"
+            status = "failed"
+
+        archive_size = self.zip_path.stat().st_size if self.zip_path.is_file() else 0
+
+        return {
+            "archive_sha256": self.archive_sha256,
+            "archive_size": archive_size,
+            "expected_xml_files": expected,
+            "found_xml_files": found,
+            "parsed_xml_files": sorted(list(self._parsed_xml)),
+            "missing_xml_files": missing,
+            "failed_xml_files": failed,
+            "total_norms": total_norms,
+            "total_fsbc": total_fsbc,
+            "duplicate_norm_ids": duplicate_norm_ids,
+            "duplicate_fsbc_ids": duplicate_fsbc_ids,
+            "parser_errors": errors,
+            "status": status,
+            "proof": proof,
+            "approval_date": self.approval_date,
+            "effective_from": self.effective_from,
+            "effective_to": self.effective_to,
+        }
 
 
 def compare_norm_editions(v1: dict[str, Any], v2: dict[str, Any]) -> dict[str, Any]:

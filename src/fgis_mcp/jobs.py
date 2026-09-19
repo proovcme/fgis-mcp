@@ -98,6 +98,7 @@ def start(
     sources=None,
     include_archive=False,
     all_periods=False,
+    opendata_version=None,
     max_tasks=25000,
 ):
     from .catalogs import task_roots
@@ -121,8 +122,16 @@ def start(
         if set(book) != {"zone_id", "period_id"} or any(type(v) is not int or v <= 0 for v in book.values()):
             raise ValueError("Each price book requires positive integer zone_id and period_id")
         tasks.append({"kind": "prices", **book})
-    if sources:
-        tasks.extend(task_roots(sources, include_archive, all_periods))
+    if sources or opendata_version:
+        actual_sources = sources or ["opendata"]
+        tasks.extend(
+            task_roots(
+                actual_sources,
+                include_archive=include_archive or bool(opendata_version),
+                all_periods=all_periods,
+                opendata_version=opendata_version,
+            )
+        )
     tasks = list({json.dumps(t, sort_keys=True): t for t in tasks}.values())
     if not 1 <= len(tasks) <= 10000:
         raise ValueError("Specify 1..10000 tasks: norm queries, collection prefixes, or price books")

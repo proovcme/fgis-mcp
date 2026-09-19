@@ -223,13 +223,41 @@ def execute(config, job_id, network=None):
                                         task.get("name", "") or file_url
                                     )
                                     reader = opendata_xml.FsnbArchiveReader(zip_path, snapshot_id=snapshot_id)
+                                    snapshot_meta = {
+                                        "snapshot_id": snapshot_id,
+                                        "dataset_number": task.get("dataset_number", "7707082071-fsnb"),
+                                        "file_name": task.get("name", ""),
+                                        "guid": task.get("guid"),
+                                        "sha256": meta["sha256"],
+                                        "archive_size": len(body),
+                                        "approval_date": reader.approval_date,
+                                        "effective_from": reader.effective_from,
+                                        "xml_files": reader.inventory,
+                                    }
+                                    data.register_snapshot(snapshot_meta, status="importing", receipt=receipt)
 
                                     # Stream norms in bounded batches
                                     norm_batch = []
+                                    seen_norm_ids = set()
+                                    duplicate_norm_ids = 0
                                     total_norms = 0
-                                    for norm_card in reader.iter_norms():
-                                        norm_batch.append(norm_card)
-                                        if len(norm_batch) >= 1000:
+                                    try:
+                                        for norm_card in reader.iter_norms():
+                                            nid = norm_card["norm_id"]
+                                            if nid in seen_norm_ids:
+                                                duplicate_norm_ids += 1
+                                            seen_norm_ids.add(nid)
+                                            norm_batch.append(norm_card)
+                                            if len(norm_batch) >= 1000:
+                                                data.add_norms(
+                                                    f"sub:{key}:norms:{total_norms}",
+                                                    norm_batch,
+                                                    receipt,
+                                                    save_receipt=False,
+                                                )
+                                                total_norms += len(norm_batch)
+                                                norm_batch = []
+                                        if norm_batch:
                                             data.add_norms(
                                                 f"sub:{key}:norms:{total_norms}",
                                                 norm_batch,
@@ -237,22 +265,28 @@ def execute(config, job_id, network=None):
                                                 save_receipt=False,
                                             )
                                             total_norms += len(norm_batch)
-                                            norm_batch = []
-                                    if norm_batch:
-                                        data.add_norms(
-                                            f"sub:{key}:norms:{total_norms}",
-                                            norm_batch,
-                                            receipt,
-                                            save_receipt=False,
-                                        )
-                                        total_norms += len(norm_batch)
 
-                                    # Stream FSBC in bounded batches
-                                    fsbc_batch = []
-                                    total_fsbc = 0
-                                    for fsbc_item in reader.iter_fsbc():
-                                        fsbc_batch.append(fsbc_item)
-                                        if len(fsbc_batch) >= 1000:
+                                        # Stream FSBC in bounded batches
+                                        fsbc_batch = []
+                                        seen_fsbc_ids = set()
+                                        duplicate_fsbc_ids = 0
+                                        total_fsbc = 0
+                                        for fsbc_item in reader.iter_fsbc():
+                                            fid = fsbc_item["fsbc_id"]
+                                            if fid in seen_fsbc_ids:
+                                                duplicate_fsbc_ids += 1
+                                            seen_fsbc_ids.add(fid)
+                                            fsbc_batch.append(fsbc_item)
+                                            if len(fsbc_batch) >= 1000:
+                                                data.add_fsbc(
+                                                    f"sub:{key}:fsbc:{total_fsbc}",
+                                                    fsbc_batch,
+                                                    receipt,
+                                                    save_receipt=False,
+                                                )
+                                                total_fsbc += len(fsbc_batch)
+                                                fsbc_batch = []
+                                        if fsbc_batch:
                                             data.add_fsbc(
                                                 f"sub:{key}:fsbc:{total_fsbc}",
                                                 fsbc_batch,
@@ -260,31 +294,30 @@ def execute(config, job_id, network=None):
                                                 save_receipt=False,
                                             )
                                             total_fsbc += len(fsbc_batch)
-                                            fsbc_batch = []
-                                    if fsbc_batch:
-                                        data.add_fsbc(
-                                            f"sub:{key}:fsbc:{total_fsbc}",
-                                            fsbc_batch,
-                                            receipt,
-                                            save_receipt=False,
-                                        )
-                                        total_fsbc += len(fsbc_batch)
 
-                                    receipt["snapshot_id"] = snapshot_id
-                                    receipt["total_norms"] = total_norms
-                                    receipt["total_fsbc"] = total_fsbc
-                                    receipt["xml_inventory"] = reader.inventory
-                                    snapshot_meta = {
-                                        "snapshot_id": snapshot_id,
-                                        "dataset_number": task.get("dataset_number", "7707082071-fsnb"),
-                                        "file_name": task.get("name", ""),
-                                        "guid": task.get("guid"),
-                                        "sha256": meta["sha256"],
-                                        "total_norms": total_norms,
-                                        "total_fsbc": total_fsbc,
-                                        "xml_files": reader.inventory,
-                                    }
-                                    data.add_snapshot(snapshot_meta, receipt)
+                                        proof = reader.evaluate_proof(
+                                            total_norms=total_norms,
+                                            total_fsbc=total_fsbc,
+                                            duplicate_norm_ids=duplicate_norm_ids,
+                                            duplicate_fsbc_ids=duplicate_fsbc_ids,
+                                        )
+                                        data.finish_snapshot(
+                                            snapshot_id,
+                                            total_norms=total_norms,
+                                            total_fsbc=total_fsbc,
+                                            proof=proof,
+                                            status="complete",
+                                            approval_date=reader.approval_date,
+                                            effective_from=reader.effective_from,
+                                        )
+                                        receipt["snapshot_id"] = snapshot_id
+                                        receipt["total_norms"] = total_norms
+                                        receipt["total_fsbc"] = total_fsbc
+                                        receipt["xml_inventory"] = reader.inventory
+                                        receipt["proof"] = proof
+                                    except Exception as exc:
+                                        data.fail_snapshot(snapshot_id, error=str(exc))
+                                        raise
 
                                 data.add_document(
                                     key,

@@ -26,26 +26,31 @@ PROOF_UNKNOWN = "unknown"
 class SourceCapability:
     source_id: str
     name_ru: str
-    overall_status: str
-    discovery_status: str
-    metadata_status: str
-    content_status: str
-    history_status: str
-    verification_status: str
+    supported: bool = True
+    data_types: list[str] = field(default_factory=list)
+    has_history: bool = False
+    overall_status: str = STATUS_COMPLETE
+    discovery_status: str = STATUS_COMPLETE
+    metadata_status: str = STATUS_COMPLETE
+    content_status: str = STATUS_COMPLETE
+    history_status: str = STATUS_COMPLETE
+    verification_status: str = PROOF_UNKNOWN
     known_limitations: list[str] = field(default_factory=list)
 
 
-# Static matrix of known capabilities
+# Static matrix of known capabilities (descriptive only: supported types, history, limitations)
 CAPABILITIES: dict[str, SourceCapability] = {
     "fsnb2022": SourceCapability(
         source_id="fsnb2022",
         name_ru="ФСНБ-2022 (ГЭСН, ГЭСНм, ГЭСНр, ГЭСНп, капремонт)",
+        data_types=["norms", "tables", "resources"],
+        has_history=True,
         overall_status=STATUS_COMPLETE,
         discovery_status=STATUS_COMPLETE,
         metadata_status=STATUS_COMPLETE,
         content_status=STATUS_COMPLETE,
         history_status=STATUS_PARTIAL,
-        verification_status=PROOF_COMPLETE_VERIFIED,
+        verification_status=PROOF_UNKNOWN,
         known_limitations=[
             "Official tree nodes represent published editions and supplements.",
             "Full national coverage requires exhaustive tree traversal; search queries are not exhaustive.",
@@ -54,23 +59,27 @@ CAPABILITIES: dict[str, SourceCapability] = {
     "fsnb2020": SourceCapability(
         source_id="fsnb2020",
         name_ru="ФСНБ-2020 (архивные сборники)",
+        data_types=["norms", "tables"],
+        has_history=True,
         overall_status=STATUS_COMPLETE,
         discovery_status=STATUS_COMPLETE,
         metadata_status=STATUS_COMPLETE,
         content_status=STATUS_COMPLETE,
         history_status=STATUS_COMPLETE,
-        verification_status=PROOF_COMPLETE_VERIFIED,
+        verification_status=PROOF_UNKNOWN,
         known_limitations=["Archived collections preserved as published."],
     ),
     "fer": SourceCapability(
         source_id="fer",
         name_ru="Федеральные единичные расценки (ФЕР)",
+        data_types=["compilations", "rates"],
+        has_history=True,
         overall_status=STATUS_COMPLETE,
         discovery_status=STATUS_COMPLETE,
         metadata_status=STATUS_COMPLETE,
         content_status=STATUS_COMPLETE,
         history_status=STATUS_PARTIAL,
-        verification_status=PROOF_COMPLETE_UNVERIFIED,
+        verification_status=PROOF_UNKNOWN,
         known_limitations=[
             "Compilations and HTML tables preserved with source cells and spans.",
             "Dedicated machine-readable rate fields depend on official table layouts.",
@@ -79,23 +88,27 @@ CAPABILITIES: dict[str, SourceCapability] = {
     "registry": SourceCapability(
         source_id="registry",
         name_ru="Федеральный реестр сметных нормативов (ФРСН)",
+        data_types=["editions", "sections"],
+        has_history=True,
         overall_status=STATUS_COMPLETE,
         discovery_status=STATUS_COMPLETE,
         metadata_status=STATUS_COMPLETE,
         content_status=STATUS_COMPLETE,
         history_status=STATUS_COMPLETE,
-        verification_status=PROOF_COMPLETE_VERIFIED,
+        verification_status=PROOF_UNKNOWN,
         known_limitations=["All 7 sections paginated with totalCount strictly verified."],
     ),
     "ter": SourceCapability(
         source_id="ter",
         name_ru="Территориальные единичные расценки (ТЕР)",
+        data_types=["metadata", "external_links"],
+        has_history=True,
         overall_status=STATUS_PARTIAL,
         discovery_status=STATUS_COMPLETE,
         metadata_status=STATUS_COMPLETE,
         content_status=STATUS_MANUAL,
         history_status=STATUS_PARTIAL,
-        verification_status=PROOF_PARTIAL,
+        verification_status=PROOF_UNKNOWN,
         known_limitations=[
             "Registry sections 6 and 7 provide official entries and external URLs.",
             "External regional portals are not automatically crawled; user can import manual files.",
@@ -104,12 +117,14 @@ CAPABILITIES: dict[str, SourceCapability] = {
     "split_forms": SourceCapability(
         source_id="split_forms",
         name_ru="Сметные цены строительных ресурсов (Сплит-формы)",
+        data_types=["prices", "monitoring"],
+        has_history=True,
         overall_status=STATUS_COMPLETE,
         discovery_status=STATUS_COMPLETE,
         metadata_status=STATUS_COMPLETE,
         content_status=STATUS_COMPLETE,
         history_status=STATUS_COMPLETE,
-        verification_status=PROOF_COMPLETE_VERIFIED,
+        verification_status=PROOF_UNKNOWN,
         known_limitations=[
             "XLSX split books downloaded and parsed losslessly.",
             "By default, downloads latest period of each zone; all periods available via --all-periods.",
@@ -118,12 +133,14 @@ CAPABILITIES: dict[str, SourceCapability] = {
     "current_prices": SourceCapability(
         source_id="current_prices",
         name_ru="Текущие цены, индексы, зарплаты, перевозки",
+        data_types=["indices", "salaries", "freight"],
+        has_history=True,
         overall_status=STATUS_COMPLETE,
         discovery_status=STATUS_COMPLETE,
         metadata_status=STATUS_COMPLETE,
         content_status=STATUS_COMPLETE,
         history_status=STATUS_COMPLETE,
-        verification_status=PROOF_COMPLETE_VERIFIED,
+        verification_status=PROOF_UNKNOWN,
         known_limitations=[
             "Covers 7 freight export services, resource groups, building/direct cost indices and РИМ wages."
         ],
@@ -131,23 +148,27 @@ CAPABILITIES: dict[str, SourceCapability] = {
     "salaries": SourceCapability(
         source_id="salaries",
         name_ru="Оплата труда рабочего первого разряда по годам",
+        data_types=["salaries"],
+        has_history=True,
         overall_status=STATUS_COMPLETE,
         discovery_status=STATUS_COMPLETE,
         metadata_status=STATUS_COMPLETE,
         content_status=STATUS_COMPLETE,
         history_status=STATUS_COMPLETE,
-        verification_status=PROOF_COMPLETE_VERIFIED,
+        verification_status=PROOF_UNKNOWN,
         known_limitations=["Annual historical salary tables preserved."],
     ),
     "archive_files": SourceCapability(
         source_id="archive_files",
         name_ru="Файловые архивы баз ФСНБ",
+        data_types=["archives"],
+        has_history=True,
         overall_status=STATUS_PARTIAL,
         discovery_status=STATUS_COMPLETE,
         metadata_status=STATUS_COMPLETE,
         content_status=STATUS_CAPTCHA_REQUIRED,
         history_status=STATUS_COMPLETE,
-        verification_status=PROOF_PARTIAL,
+        verification_status=PROOF_UNKNOWN,
         known_limitations=[
             "Catalogue metadata is complete and discoverable.",
             "Direct ZIP download is protected by portal interactive CAPTCHA; manual import supported.",
@@ -156,12 +177,14 @@ CAPABILITIES: dict[str, SourceCapability] = {
     "opendata": SourceCapability(
         source_id="opendata",
         name_ru="Открытые данные Минстроя России (OpenData)",
+        data_types=["passports", "fsnb_xml", "fsbc_xml"],
+        has_history=True,
         overall_status=STATUS_COMPLETE,
         discovery_status=STATUS_COMPLETE,
         metadata_status=STATUS_COMPLETE,
         content_status=STATUS_COMPLETE,
         history_status=STATUS_COMPLETE,
-        verification_status=PROOF_COMPLETE_VERIFIED,
+        verification_status=PROOF_UNKNOWN,
         known_limitations=["Official passports and dataset file distributions."],
     ),
 }
@@ -174,12 +197,15 @@ def source_capability(source_id: str) -> dict[str, Any]:
     return {
         "source_id": source_id,
         "name_ru": source_id,
-        "overall_status": STATUS_COMPLETE,
-        "discovery_status": STATUS_COMPLETE,
-        "metadata_status": STATUS_COMPLETE,
-        "content_status": STATUS_COMPLETE,
-        "history_status": STATUS_PARTIAL,
-        "verification_status": PROOF_COMPLETE_UNVERIFIED,
+        "supported": False,
+        "data_types": [],
+        "has_history": False,
+        "overall_status": STATUS_UNKNOWN,
+        "discovery_status": STATUS_UNKNOWN,
+        "metadata_status": STATUS_UNKNOWN,
+        "content_status": STATUS_UNKNOWN,
+        "history_status": STATUS_UNKNOWN,
+        "verification_status": PROOF_UNKNOWN,
         "known_limitations": [],
     }
 
@@ -210,13 +236,13 @@ def evaluate_coverage(
                 "failed_tasks": 0,
                 "expected_upstream_total": None,
                 "received_upstream_items": 0,
-                "overall_status": cap.get("overall_status", STATUS_COMPLETE),
+                "overall_status": STATUS_UNKNOWN,
                 "dimensions": {
-                    "discovery": cap.get("discovery_status", STATUS_COMPLETE),
-                    "metadata": cap.get("metadata_status", STATUS_COMPLETE),
-                    "content": cap.get("content_status", STATUS_COMPLETE),
-                    "history": cap.get("history_status", STATUS_PARTIAL),
-                    "verification": cap.get("verification_status", PROOF_COMPLETE_UNVERIFIED),
+                    "discovery": cap.get("discovery_status", STATUS_UNKNOWN),
+                    "metadata": cap.get("metadata_status", STATUS_UNKNOWN),
+                    "content": cap.get("content_status", STATUS_UNKNOWN),
+                    "history": cap.get("history_status", STATUS_UNKNOWN),
+                    "verification": PROOF_UNKNOWN,
                 },
                 "proof": PROOF_UNKNOWN,
                 "known_limitations": cap.get("known_limitations", []),
@@ -247,8 +273,12 @@ def evaluate_coverage(
             entry = by_source[source]
             records = receipt.get("records") or receipt.get("rows") or 0
             entry["received_upstream_items"] += records
+            if "total_count" in receipt:
+                entry["expected_upstream_total"] = (entry["expected_upstream_total"] or 0) + receipt[
+                    "total_count"
+                ]
 
-    # Calculate verification proof for each source
+    # Calculate verification proof for each source strictly from traversal evidence
     has_bounded = False
     has_failed = False
     for source, entry in by_source.items():
@@ -257,20 +287,53 @@ def evaluate_coverage(
         fails = entry["failed_tasks"]
 
         if fails > 0:
-            entry["proof"] = PROOF_PARTIAL
+            entry["proof"] = PROOF_FAILED if succ == 0 else PROOF_PARTIAL
+            entry["overall_status"] = "failed" if succ == 0 else STATUS_PARTIAL
+            entry["dimensions"]["verification"] = entry["proof"]
             has_failed = True
         elif succ < disc:
             entry["proof"] = PROOF_BOUNDED
+            entry["overall_status"] = "bounded"
+            entry["dimensions"]["verification"] = PROOF_BOUNDED
             has_bounded = True
         elif disc == succ and disc > 0:
-            # If capabilities have a verified claim or totalCount matched
-            cap = CAPABILITIES.get(source)
-            if cap and cap.verification_status == PROOF_COMPLETE_VERIFIED:
+            # Evidence-based verification proof:
+            # 1. Any receipt for this source carries explicit proof == PROOF_COMPLETE_VERIFIED or verified_complete == True
+            # 2. Upstream total_count is declared and matches total received records with >0 records
+            has_verified_evidence = False
+            for r in completed_receipts:
+                req = r.get("request", {})
+                req_src = req.get(
+                    "source",
+                    "split_forms"
+                    if req.get("kind") == "prices"
+                    else "norms_search"
+                    if req.get("kind") == "norms"
+                    else req.get("kind", "unknown"),
+                )
+                if req_src == source:
+                    if r.get("proof") == PROOF_COMPLETE_VERIFIED or r.get("verified_complete") is True:
+                        has_verified_evidence = True
+                        break
+                    if (
+                        r.get("total_count") is not None
+                        and r.get("total_count") == r.get("records")
+                        and r.get("records", 0) > 0
+                    ):
+                        has_verified_evidence = True
+                        break
+
+            if has_verified_evidence:
                 entry["proof"] = PROOF_COMPLETE_VERIFIED
+                entry["dimensions"]["verification"] = PROOF_COMPLETE_VERIFIED
             else:
                 entry["proof"] = PROOF_COMPLETE_UNVERIFIED
+                entry["dimensions"]["verification"] = PROOF_COMPLETE_UNVERIFIED
+            entry["overall_status"] = STATUS_COMPLETE
         else:
             entry["proof"] = PROOF_UNKNOWN
+            entry["overall_status"] = STATUS_UNKNOWN
+            entry["dimensions"]["verification"] = PROOF_UNKNOWN
 
     if not tasks:
         overall_proof = PROOF_UNKNOWN
