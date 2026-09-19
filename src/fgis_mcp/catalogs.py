@@ -349,16 +349,26 @@ def children(payload, task):
             else:
                 selected_files = all_files
             for f in selected_files:
-                out.append(
-                    {
-                        "kind": "opendata_file",
-                        "source": "opendata",
-                        "dataset_number": task["dataset_number"],
-                        "file_url": f["source_url"],
-                        "format": f.get("format", "bin"),
-                        "name": f.get("name", ""),
-                    }
+                guid_val = (
+                    f.get("guid")
+                    or f.get("distribution_guid")
+                    or f.get("document_guid")
+                    or f.get("file_guid")
                 )
+                if not guid_val and "/values/GetFileContent/" in f.get("source_url", ""):
+                    guid_val = f["source_url"].split("/values/GetFileContent/")[-1].strip()
+                child_task = {
+                    "kind": "opendata_file",
+                    "source": "opendata",
+                    "dataset_number": task["dataset_number"],
+                    "file_url": f["source_url"],
+                    "format": f.get("format", "bin"),
+                    "name": f.get("name", ""),
+                }
+                if guid_val:
+                    child_task["guid"] = guid_val
+                    child_task["distribution_guid"] = guid_val
+                out.append(child_task)
     return out
 
 

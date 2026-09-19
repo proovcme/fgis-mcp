@@ -649,14 +649,15 @@ class FsnbArchiveReader:
         failed = sorted(list(self._failed_xml))
 
         is_fsnb_standard = set(expected) == set(EXPECTED_FSNB_2022_XML)
+        all_expected_parsed = set(self._parsed_xml) == set(expected)
 
-        if missing:
+        if missing or not all_expected_parsed:
             proof = "partial"
             status = "failed" if (total_norms == 0 and total_fsbc == 0) else "partial"
         elif errors or failed or duplicate_norm_ids > 0 or duplicate_fsbc_ids > 0:
             proof = "partial"
             status = "failed"
-        elif total_norms > 0 and total_fsbc > 0 and not missing and not failed:
+        elif total_norms > 0 and total_fsbc > 0 and not missing and not failed and all_expected_parsed:
             proof = "complete_verified" if is_fsnb_standard else "complete_unverified"
             status = "complete"
         elif total_norms > 0 or total_fsbc > 0:
@@ -678,6 +679,7 @@ class FsnbArchiveReader:
             "parsed_xml_files": sorted(list(self._parsed_xml)),
             "missing_xml_files": missing,
             "failed_xml_files": failed,
+            "all_expected_parsed": all_expected_parsed,
             "total_norms": total_norms,
             "total_fsbc": total_fsbc,
             "duplicate_norm_ids": duplicate_norm_ids,

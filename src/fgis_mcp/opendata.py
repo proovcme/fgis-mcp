@@ -69,33 +69,46 @@ def normalize_passport(raw: dict[str, Any], number: str) -> dict[str, Any]:
     for f in raw_files:
         if isinstance(f, dict):
             file_url = clean(f.get("source_url") or f.get("source") or f.get("url") or f.get("link") or "")
+            file_guid = clean(
+                f.get("guid")
+                or f.get("distribution_guid")
+                or f.get("document_guid")
+                or f.get("file_guid")
+                or ""
+            )
+            if not file_guid and "/values/GetFileContent/" in file_url:
+                file_guid = file_url.split("/values/GetFileContent/")[-1].strip()
             file_format = clean(f.get("format") or "").upper()
             file_version = clean(f.get("version") or version)
             file_desc = clean(f.get("description") or "")
             file_date = clean(f.get("created") or f.get("date") or "")
             if file_url:
-                files.append(
-                    {
-                        "name": clean(f.get("name") or ""),
-                        "source_url": file_url,
-                        "format": file_format,
-                        "version": file_version,
-                        "description": file_desc,
-                        "date": file_date,
-                        "is_current": bool(f.get("is_current")),
-                    }
-                )
+                item = {
+                    "name": clean(f.get("name") or ""),
+                    "source_url": file_url,
+                    "format": file_format,
+                    "version": file_version,
+                    "description": file_desc,
+                    "date": file_date,
+                    "is_current": bool(f.get("is_current")),
+                }
+                if file_guid:
+                    item["guid"] = file_guid
+                    item["distribution_guid"] = file_guid
+                files.append(item)
 
     # 2. Process files from live portal schema ('datasetFile' and 'datasetVersionFiles')
     df = raw.get("datasetFile")
     if isinstance(df, dict) and df.get("path"):
         name = clean(df.get("name") or "")
         ext = name.rsplit(".", 1)[-1].upper() if "." in name else "ZIP"
+        guid_val = clean(df["path"])
         files.append(
             {
                 "name": name,
                 "source_url": f"{BASE}values/GetFileContent/{df['path']}",
-                "guid": clean(df["path"]),
+                "guid": guid_val,
+                "distribution_guid": guid_val,
                 "format": ext,
                 "version": version or "current",
                 "description": "Актуальный файл набора данных",
@@ -108,11 +121,13 @@ def normalize_passport(raw: dict[str, Any], number: str) -> dict[str, Any]:
         if isinstance(vf, dict) and vf.get("path"):
             vname = clean(vf.get("name") or "")
             vext = vname.rsplit(".", 1)[-1].upper() if "." in vname else "ZIP"
+            vguid_val = clean(vf["path"])
             files.append(
                 {
                     "name": vname,
                     "source_url": f"{BASE}values/GetFileContent/{vf['path']}",
-                    "guid": clean(vf["path"]),
+                    "guid": vguid_val,
+                    "distribution_guid": vguid_val,
                     "format": vext,
                     "version": vname,
                     "description": "Версионный файл набора данных",

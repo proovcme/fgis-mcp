@@ -156,18 +156,21 @@ class Service:
                 doc = (r.get("source") or {}).get("document", "")
                 guid_val = (r.get("source") or {}).get("document_guid", "")
                 snap_val = str(r.get("snapshot_id") or "")
+                s_uid_val = str(r.get("snapshot_uid") or "")
                 decree_val = str(r.get("decree") or "")
                 norm_id_val = str(r.get("norm_id") or "")
 
                 matches_a = edition_a and (
-                    edition_a in doc
+                    edition_a == s_uid_val
+                    or edition_a in doc
                     or edition_a == guid_val
                     or edition_a in snap_val
                     or edition_a in decree_val
                     or edition_a in norm_id_val
                 )
                 matches_b = edition_b and (
-                    edition_b in doc
+                    edition_b == s_uid_val
+                    or edition_b in doc
                     or edition_b == guid_val
                     or edition_b in snap_val
                     or edition_b in decree_val
@@ -214,6 +217,7 @@ class Service:
         include_incomplete: bool = False,
     ):
         from .opendata_xml import compare_fsnb_editions
+        from .storage import resolve_snapshot_ref
 
         if not dataset_id:
             datasets = self.datasets().get("items", [])
@@ -223,18 +227,14 @@ class Service:
 
         data = Dataset(self.config.root, dataset_id)
         with data.connect() as conn:
-            if not include_incomplete:
-                for snap in (snapshot_a, snapshot_b):
-                    row = conn.execute(
-                        "SELECT status FROM snapshots WHERE snapshot_uid=? OR snapshot_id=? ORDER BY (status = 'complete') DESC",
-                        (snap, snap),
-                    ).fetchone()
-                    if row and row[0] != "complete":
-                        raise ValueError(f"Snapshot {snap} is not complete (status: {row[0]})")
+            uid_a = resolve_snapshot_ref(conn, snapshot_a, include_incomplete=include_incomplete)
+            uid_b = resolve_snapshot_ref(conn, snapshot_b, include_incomplete=include_incomplete)
 
-            query = "SELECT payload FROM norms WHERE (snapshot_uid=? OR snapshot_id=? OR norm_id LIKE ?)"
-            params_a = [snapshot_a, snapshot_a, f"{snapshot_a}:%"]
-            params_b = [snapshot_b, snapshot_b, f"{snapshot_b}:%"]
+            query = (
+                "SELECT payload FROM norms WHERE (snapshot_uid=? OR (snapshot_uid IS NULL AND snapshot_id=?))"
+            )
+            params_a = [uid_a, snapshot_a]
+            params_b = [uid_b, snapshot_b]
             if family:
                 query += " AND family=?"
                 params_a.append(family)
@@ -257,7 +257,7 @@ class Service:
                 f"No norms found for snapshots {snapshot_a} and {snapshot_b} in dataset {dataset_id}"
             )
 
-        return compare_fsnb_editions(norms_a, norms_b, v1_snapshot_id=snapshot_a, v2_snapshot_id=snapshot_b)
+        return compare_fsnb_editions(norms_a, norms_b, v1_snapshot_id=uid_a, v2_snapshot_id=uid_b)
 
     def import_opendata_archive(
         self,
@@ -265,6 +265,7 @@ class Service:
         dataset_id: str | None = None,
         snapshot_id: str | None = None,
         distribution_guid: str | None = None,
+        dataset_number: str = "7707082071-fsnb",
     ):
         import uuid
         from pathlib import Path
@@ -293,13 +294,13 @@ class Service:
         # Compute archive SHA-256 first for safe re-import check
         file_sha256 = sha_file(path)
 
-        # Check if already imported with the same SHA-256 and status == 'complete'
+        # Check if already imported with the same SHA-256 in the same dataset_number and status == 'complete'
         with data.connect() as conn:
             row = conn.execute(
                 """SELECT snapshot_uid, snapshot_id, total_norms, total_fsbc, payload, proof
                 FROM snapshots
-                WHERE (archive_sha256=? OR sha256=?) AND status='complete'""",
-                (file_sha256, file_sha256),
+                WHERE dataset_number=? AND (archive_sha256=? OR sha256=?) AND status='complete'""",
+                (dataset_number, file_sha256, file_sha256),
             ).fetchone()
             if row:
                 existing_meta = json.loads(row[4]) if row[4] else {}
@@ -324,6 +325,7 @@ class Service:
             path,
             snapshot_id=snapshot_id,
             distribution_guid=distribution_guid,
+            dataset_number=dataset_number,
             archive_sha256=h,
         )
         snap_id = reader.snapshot_id
@@ -340,6 +342,7 @@ class Service:
                 "archive_path": str(path),
                 "snapshot_id": snap_id,
                 "snapshot_uid": snap_uid,
+                "dataset_number": dataset_number,
                 "distribution_guid": distribution_guid,
             },
             "raw_file": raw_rel,
@@ -349,7 +352,7 @@ class Service:
         snapshot_meta = {
             "snapshot_uid": snap_uid,
             "snapshot_id": snap_id,
-            "dataset_number": "7707082071-fsnb",
+            "dataset_number": dataset_number,
             "distribution_guid": distribution_guid,
             "archive_sha256": h,
             "file_name": path.name,

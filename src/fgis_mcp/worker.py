@@ -184,8 +184,19 @@ def execute(config, job_id, network=None):
                                     ] or all_files[:1]
                                 else:
                                     selected_files = all_files
-                                receipt["children"] = [
-                                    {
+                                receipt["children"] = []
+                                for f in selected_files:
+                                    guid_val = (
+                                        f.get("guid")
+                                        or f.get("distribution_guid")
+                                        or f.get("document_guid")
+                                        or f.get("file_guid")
+                                    )
+                                    if not guid_val and "/values/GetFileContent/" in f.get("source_url", ""):
+                                        guid_val = (
+                                            f["source_url"].split("/values/GetFileContent/")[-1].strip()
+                                        )
+                                    child_entry = {
                                         "kind": "opendata_file",
                                         "source": "opendata",
                                         "dataset_number": task["dataset_number"],
@@ -193,8 +204,10 @@ def execute(config, job_id, network=None):
                                         "format": f.get("format", "bin"),
                                         "name": f.get("name", ""),
                                     }
-                                    for f in selected_files
-                                ]
+                                    if guid_val:
+                                        child_entry["guid"] = guid_val
+                                        child_entry["distribution_guid"] = guid_val
+                                    receipt["children"].append(child_entry)
                                 data.add_document(key, norm_passport, receipt)
                             elif task["kind"] in {"opendata_file", "opendata_snapshot"}:
                                 from . import opendata_xml
@@ -220,19 +233,19 @@ def execute(config, job_id, network=None):
                                 if is_fsnb_zip:
                                     zip_path = data.path / raw_rel
                                     archive_sha = meta["sha256"]
-                                    dist_guid = task.get("guid") or task.get("distribution_guid")
+                                    dist_guid = task.get("distribution_guid") or task.get("guid")
                                     snapshot_id = task.get("snapshot_id") or opendata_xml.extract_snapshot_id(
                                         task.get("name", "") or file_url
                                     )
                                     ds_num = task.get("dataset_number", "7707082071-fsnb")
 
-                                    # Check safe re-import
+                                    # Check safe re-import strictly scoped to dataset_number
                                     with data.connect() as conn:
                                         existing = conn.execute(
                                             """SELECT snapshot_uid, snapshot_id, total_norms, total_fsbc, proof
                                             FROM snapshots
-                                            WHERE (archive_sha256=? OR sha256=?) AND status='complete'""",
-                                            (archive_sha, archive_sha),
+                                            WHERE dataset_number=? AND (archive_sha256=? OR sha256=?) AND status='complete'""",
+                                            (ds_num, archive_sha, archive_sha),
                                         ).fetchone()
                                         if existing:
                                             receipt["snapshot_uid"] = existing[0]

@@ -57,6 +57,86 @@ def build_snapshot_uid(
     return f"{clean_ds}:{clean_snap}:{clean_sha}"
 
 
+def resolve_snapshot_ref(
+    conn: sqlite3.Connection,
+    ref: str,
+    *,
+    include_incomplete: bool = False,
+) -> str:
+    """Resolve a snapshot reference (snapshot_uid or snapshot_id) to a canonical snapshot_uid.
+
+    Rules:
+    - If ref matches a snapshot_uid exactly:
+        - If complete, or include_incomplete=True: return it.
+        - Otherwise, raise ValueError(f"SNAPSHOT_NOT_COMPLETE: Snapshot '{ref}' has status '{status}'").
+    - Otherwise, query snapshots by snapshot_id:
+        - If complete (or include_incomplete=True):
+            - If exactly 1 matching snapshot: return its snapshot_uid.
+            - If >1 matching snapshots: raise ValueError(f"AMBIGUOUS_SNAPSHOT: Reference '{ref}' matches multiple snapshots: {uids}").
+            - If 0 matching:
+                - If incomplete snapshots exist with that snapshot_id and include_incomplete=False:
+                    raise ValueError(f"SNAPSHOT_NOT_COMPLETE: Snapshot reference '{ref}' is not complete").
+                - Otherwise raise ValueError(f"SNAPSHOT_NOT_FOUND: No snapshot found for reference '{ref}'").
+    """
+    if not ref or not str(ref).strip():
+        raise ValueError("SNAPSHOT_NOT_FOUND: Empty snapshot reference")
+
+    ref_str = str(ref).strip()
+
+    # 1. Exact match on snapshot_uid
+    row = conn.execute(
+        "SELECT snapshot_uid, status FROM snapshots WHERE snapshot_uid=?",
+        (ref_str,),
+    ).fetchone()
+    if row:
+        s_uid, status = row
+        if not include_incomplete and status != "complete":
+            raise ValueError(f"SNAPSHOT_NOT_COMPLETE: Snapshot '{ref_str}' has status '{status}'")
+        return s_uid
+
+    # 2. Match on snapshot_id
+    where = "WHERE snapshot_id=?" + ("" if include_incomplete else " AND status='complete'")
+    rows = conn.execute(
+        f"SELECT snapshot_uid FROM snapshots {where} ORDER BY snapshot_uid ASC",
+        (ref_str,),
+    ).fetchall()
+
+    if len(rows) == 1:
+        return rows[0][0]
+    elif len(rows) > 1:
+        uids = [r[0] for r in rows]
+        raise ValueError(f"AMBIGUOUS_SNAPSHOT: Reference '{ref_str}' matches multiple snapshots: {uids}")
+    else:
+        if not include_incomplete:
+            inc_rows = conn.execute(
+                "SELECT snapshot_uid, status FROM snapshots WHERE snapshot_id=?",
+                (ref_str,),
+            ).fetchall()
+            if inc_rows:
+                statuses = [f"{r[0]} ({r[1]})" for r in inc_rows]
+                raise ValueError(
+                    f"SNAPSHOT_NOT_COMPLETE: Snapshot reference '{ref_str}' has incomplete status: {statuses}"
+                )
+
+        # 3. Fallback for unindexed/synthetic norm records when snapshots table has no entry
+        norm_uids = [
+            r[0]
+            for r in conn.execute(
+                "SELECT DISTINCT coalesce(snapshot_uid, snapshot_id) FROM norms WHERE snapshot_uid=? OR snapshot_id=?",
+                (ref_str, ref_str),
+            ).fetchall()
+            if r[0]
+        ]
+        if len(norm_uids) == 1:
+            return norm_uids[0]
+        elif len(norm_uids) > 1:
+            raise ValueError(
+                f"AMBIGUOUS_SNAPSHOT: Reference '{ref_str}' matches multiple norms snapshots: {norm_uids}"
+            )
+
+        raise ValueError(f"SNAPSHOT_NOT_FOUND: No snapshot found for reference '{ref_str}'")
+
+
 class Dataset:
     def __init__(self, root: Path, dataset_id: str, *, create=False):
         self.id = identifier(dataset_id)
@@ -211,6 +291,20 @@ class Dataset:
             conn.execute("CREATE INDEX IF NOT EXISTS norm_snapshot ON norms(snapshot_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS norm_snapshot_uid ON norms(snapshot_uid)")
 
+            # Unambiguous backfill for legacy norms
+            legacy_norm_sids = conn.execute(
+                "SELECT DISTINCT snapshot_id FROM norms WHERE snapshot_uid IS NULL AND snapshot_id IS NOT NULL"
+            ).fetchall()
+            for (sid,) in legacy_norm_sids:
+                snap_rows = conn.execute(
+                    "SELECT snapshot_uid FROM snapshots WHERE snapshot_id=?", (sid,)
+                ).fetchall()
+                if len(snap_rows) == 1:
+                    conn.execute(
+                        "UPDATE norms SET snapshot_uid=? WHERE snapshot_id=? AND snapshot_uid IS NULL",
+                        (snap_rows[0][0], sid),
+                    )
+
             # Ensure fsbc table & columns
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS fsbc (fsbc_id TEXT PRIMARY KEY, code TEXT NOT NULL,
@@ -222,6 +316,24 @@ class Dataset:
                 conn.execute("ALTER TABLE fsbc ADD COLUMN snapshot_uid TEXT")
             conn.execute("CREATE INDEX IF NOT EXISTS fsbc_code ON fsbc(code, snapshot_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS fsbc_snapshot_uid ON fsbc(snapshot_uid)")
+
+            # Unambiguous backfill for legacy fsbc
+            legacy_fsbc_sids = conn.execute(
+                "SELECT DISTINCT snapshot_id FROM fsbc WHERE snapshot_uid IS NULL AND snapshot_id IS NOT NULL"
+            ).fetchall()
+            for (sid,) in legacy_fsbc_sids:
+                snap_rows = conn.execute(
+                    "SELECT snapshot_uid FROM snapshots WHERE snapshot_id=?", (sid,)
+                ).fetchall()
+                if len(snap_rows) == 1:
+                    conn.execute(
+                        "UPDATE fsbc SET snapshot_uid=? WHERE snapshot_id=? AND snapshot_uid IS NULL",
+                        (snap_rows[0][0], sid),
+                    )
+
+    def resolve_snapshot_ref(self, ref: str, *, include_incomplete: bool = False) -> str:
+        with self.connect() as conn:
+            return resolve_snapshot_ref(conn, ref, include_incomplete=include_incomplete)
 
     @contextmanager
     def connect(self):
@@ -649,12 +761,11 @@ class Dataset:
 
         query = f"""
             SELECT n.payload, s.status, s.file_name, coalesce(s.archive_sha256, s.sha256), s.approval_date,
-                   s.effective_from, s.payload, s.snapshot_uid, s.snapshot_id
+                   s.effective_from, s.payload, s.snapshot_uid, s.snapshot_id, n.snapshot_uid, n.snapshot_id
             FROM norms n
-            LEFT JOIN snapshots s ON (
-                (n.snapshot_uid IS NOT NULL AND n.snapshot_uid = s.snapshot_uid)
-                OR (n.snapshot_uid = s.snapshot_id)
-                OR (n.snapshot_id IS NOT NULL AND n.snapshot_id = s.snapshot_id)
+            LEFT JOIN snapshots s ON s.snapshot_uid = coalesce(
+                n.snapshot_uid,
+                (SELECT s2.snapshot_uid FROM snapshots s2 WHERE s2.snapshot_id = n.snapshot_id GROUP BY s2.snapshot_id HAVING count(*) = 1)
             )
             {where}
             ORDER BY n.norm_id ASC
@@ -682,10 +793,14 @@ class Dataset:
             snap_payload = json.loads(r[6]) if r[6] else {}
             s_uid_col = r[7]
             s_id_col = r[8]
+            n_uid_col = r[9]
+            n_id_col = r[10]
 
             card_src = card.get("source") if isinstance(card.get("source"), dict) else {}
-            snap_id = card.get("snapshot_id") or card_src.get("snapshot_id") or s_id_col or ""
-            snap_uid = card.get("snapshot_uid") or card_src.get("snapshot_uid") or s_uid_col or snap_id
+            snap_id = n_id_col or card.get("snapshot_id") or card_src.get("snapshot_id") or s_id_col or ""
+            snap_uid = (
+                n_uid_col or card.get("snapshot_uid") or card_src.get("snapshot_uid") or s_uid_col or snap_id
+            )
 
             provenance = {
                 "snapshot_uid": snap_uid,
@@ -763,40 +878,37 @@ class Dataset:
         """Compare two specific snapshot editions of a norm with structured diff."""
         from .opendata_xml import compare_norm_editions
 
-        clauses = ["n.code=?"]
-        params = [code]
-        if family:
-            clauses.append("n.family=?")
-            params.append(family)
-        if not include_incomplete:
-            clauses.append("(s.status = 'complete' OR s.status IS NULL)")
-        where = " WHERE " + " AND ".join(clauses)
-
-        query = f"""
-            SELECT n.payload FROM norms n
-            LEFT JOIN snapshots s ON (
-                (n.snapshot_uid IS NOT NULL AND n.snapshot_uid = s.snapshot_uid)
-                OR (n.snapshot_uid = s.snapshot_id)
-                OR (n.snapshot_id IS NOT NULL AND n.snapshot_id = s.snapshot_id)
-            )
-            {where}
-        """
-
         with self.connect() as conn:
+            uid_1 = resolve_snapshot_ref(conn, snapshot_id_1, include_incomplete=include_incomplete)
+            uid_2 = resolve_snapshot_ref(conn, snapshot_id_2, include_incomplete=include_incomplete)
+
+            clauses = ["n.code=?"]
+            params = [code]
+            if family:
+                clauses.append("n.family=?")
+                params.append(family)
+            where = " WHERE " + " AND ".join(clauses)
+
+            query = f"SELECT n.payload, n.snapshot_uid, n.snapshot_id FROM norms n {where}"
             rows = conn.execute(query, params).fetchall()
-        editions = [json.loads(r[0]) for r in rows]
 
-        def matches_snapshot(item: dict, snap: str) -> bool:
-            s_uid = str(item.get("snapshot_uid") or "")
-            s_id = str(
-                item.get("snapshot_id")
-                or (item.get("source", {}).get("snapshot_id") if isinstance(item.get("source"), dict) else "")
-            )
-            nid = str(item.get("norm_id") or "")
-            return snap in (s_uid, s_id) or nid.startswith(f"{snap}:") or s_uid.startswith(snap)
+        editions = []
+        for r in rows:
+            payload = json.loads(r[0])
+            s_uid = r[1] or payload.get("snapshot_uid")
+            s_id = r[2] or payload.get("snapshot_id")
+            editions.append((payload, s_uid, s_id))
 
-        card1 = next((e for e in editions if matches_snapshot(e, snapshot_id_1)), None)
-        card2 = next((e for e in editions if matches_snapshot(e, snapshot_id_2)), None)
+        def matches_edition(item_tuple, target_uid, orig_ref):
+            payload, s_uid, s_id = item_tuple
+            if s_uid == target_uid:
+                return True
+            if s_uid is None and s_id == orig_ref:
+                return True
+            return False
+
+        card1 = next((e[0] for e in editions if matches_edition(e, uid_1, snapshot_id_1)), None)
+        card2 = next((e[0] for e in editions if matches_edition(e, uid_2, snapshot_id_2)), None)
 
         if card1 is None or card2 is None:
             missing = []
@@ -837,7 +949,7 @@ class Dataset:
                     total_n
                     if total_n
                     else conn.execute(
-                        "SELECT count(*) FROM norms WHERE snapshot_uid=? OR snapshot_id=?",
+                        "SELECT count(*) FROM norms WHERE snapshot_uid=? OR (snapshot_uid IS NULL AND snapshot_id=?)",
                         (s_uid, s_id),
                     ).fetchone()[0]
                 )
@@ -845,7 +957,7 @@ class Dataset:
                     total_f
                     if total_f
                     else conn.execute(
-                        "SELECT count(*) FROM fsbc WHERE snapshot_uid=? OR snapshot_id=?",
+                        "SELECT count(*) FROM fsbc WHERE snapshot_uid=? OR (snapshot_uid IS NULL AND snapshot_id=?)",
                         (s_uid, s_id),
                     ).fetchone()[0]
                 )
