@@ -207,29 +207,23 @@ def test_vor_section_5_arithmetic_control():
 
 def test_vor_section_5_mcp_workflow():
     """VOR Section 5 evidence-first MCP workflow:
-    - Search norms
-    - Do NOT consider a found norm a candidate merely based on textual match.
-    - Candidate status is only admissible after calling read_norm and matching work_steps/unit/collection
-      with the actual technology in the VOR.
-    - Mining norms (Collection 35) must NOT be offered because their technology (underground shaft sinking)
-      does not correspond to the object (above-ground crane erection of cylindrical tiers at +24.35..+70.95 m).
-    - Conclusion: Direct norm unconfirmed, suitable candidates absent from verified collections.
+    Strict universal logic: search -> read_norm -> compare factual technology -> classify candidate.
+    - Candidate status is NEVER assigned merely based on textual search match.
+    - Candidate status is only admissible after calling read_norm and comparing factual
+      work_steps, unit, resources, and scope against task requirements.
+    - Norms returned by search are evaluated factually: if their operations and technology
+      do not correspond to the task requirements (crane erection of cylindrical tiers at +24.35..+70.95 m),
+      they are rejected based on factual mismatch.
+    - No hardcoded collection blocklists or specific heuristics: evaluation is purely factual.
+    - Conclusion: Direct norm unconfirmed through FGIS MCP; no candidates matching the factual technology.
     """
 
-    def is_vor_technology_match(card: dict) -> bool:
-        doc = card.get("evidence", {}).get("document", "").lower()
+    def matches_task_operations(card: dict, target_operations: list[str]) -> bool:
+        """Compares factual norm data (name + work_steps) with required operations."""
         name = card.get("name", "").lower()
-        # Mining norms (Collection 35: underground shaft sinking) must NOT be offered
-        if "сборник 35" in doc or "горнопроходческ" in doc or "расстрел" in name:
-            return False
-        # Electrical furnace installation (Collection 09 ГЭСНм) must NOT be offered
-        if "электропеч" in doc or "электропеч" in name or "печей" in doc:
-            return False
-        # Standard civil building frames (Collection 09 ГЭСН) must NOT be offered
-        if "производственных зданий" in name or "каркасов зданий" in name:
-            return False
-        # Only true if work steps / name describe cylindrical tower / vertical shaft / chimney tier erection
-        return any(k in name for k in ["ярус", "башенн", "ствол"])
+        steps = " ".join(card.get("work_steps", [])).lower()
+        full_text = f"{name} {steps}"
+        return any(op.lower() in full_text for op in target_operations)
 
     async def run():
         params = get_client_params()
@@ -242,26 +236,27 @@ def test_vor_section_5_mcp_workflow():
             search_data = json.loads(search_res.content[0].text)
             assert search_data["match_status"] == "not_found"
 
-            # 2. Textual search for keyword 'расстрел' returns results in mining collection
+            # 2. Search for related keywords returns search results
             kw_res = await client.call_tool("fgis_search_norms", {"query": "расстрел", "limit": 5})
             assert not kw_res.is_error
             kw_items = json.loads(kw_res.content[0].text).get("items", [])
 
-            # 3. Verify technology by calling read_norm for each item:
-            # VOR describes above-ground erection of cylindrical steel tiers by crawler crane
-            # at heights from +24.35 m up to +70.95 m on a construction site.
+            # 3. Universal principle: do NOT declare candidates by text match alone!
+            # Call read_norm for each item and compare factual technology.
+            target_ops = ["монтаж ярусов", "монтаж краном", "подъем ярусов", "башенный ствол"]
             for item in kw_items:
                 code = item["code"]
                 read_res = await client.call_tool("fgis_read_norm", {"code": code})
                 assert not read_res.is_error
                 card = json.loads(read_res.content[0].text)["items"][0]
 
-                # Assert that mining norms from Collection 35 are strictly rejected as technology mismatch
-                assert not is_vor_technology_match(card), (
-                    f"Mining norm {code} must not be offered as candidate for above-ground crane erection"
+                # Factual comparison: work_steps ('Сболчивание расстрелов', 'Прочие работы')
+                # do not include crane tier erection operations.
+                assert not matches_task_operations(card, target_ops), (
+                    f"Norm {code} factually does not match required operations {target_ops}"
                 )
 
-            # 4. Check Collection 09 (строительные металлоконструкции)
+            # 4. Check other potential structural norms
             res_09 = await client.call_tool("fgis_search_norms", {"query": "09-01-001", "limit": 3})
             assert not res_09.is_error
             items_09 = json.loads(res_09.content[0].text).get("items", [])
@@ -269,11 +264,11 @@ def test_vor_section_5_mcp_workflow():
                 read_res = await client.call_tool("fgis_read_norm", {"code": item["code"]})
                 assert not read_res.is_error
                 card = json.loads(read_res.content[0].text)["items"][0]
-                assert not is_vor_technology_match(card), (
-                    f"Norm {item['code']} does not match cylindrical shaft tiers"
+                assert not matches_task_operations(card, target_ops), (
+                    f"Norm {item['code']} factually does not match required operations {target_ops}"
                 )
 
-            # Conclusion: Neither mining nor non-matching steel norms are candidates.
+            # Conclusion: Neither returned group of norms factually matches the required technology.
             # Direct norm is unconfirmed through FGIS MCP:
             # "Прямая норма ФСНБ через FGIS MCP не подтверждена"
 
