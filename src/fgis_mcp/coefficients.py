@@ -153,6 +153,16 @@ def extract_coefficients_from_table(
             "source_sha256": provenance.get("sha256"),
             "source_url": provenance.get("source_url"),
             "status": status,
+            "evidence": {
+                "source": doc_info.get("source", "normative"),
+                "source_type": "official_document_table",
+                "document": doc_info.get("name"),
+                "document_guid": doc_info.get("document_guid"),
+                "table_index": table_index,
+                "row_index": r_idx,
+                "sha256": provenance.get("sha256"),
+                "source_url": provenance.get("source_url"),
+            },
         }
         results.append(entry)
 

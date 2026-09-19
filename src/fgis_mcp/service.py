@@ -4,6 +4,7 @@ from filelock import FileLock, Timeout
 
 from . import jobs
 from .documents import OnlineDocuments
+from .errors import LocalDatasetIncompleteError, NotFoundError
 from .network import Network
 from .normalize import norm_cards
 from .storage import Dataset, now
@@ -42,14 +43,48 @@ class Service:
             raise ValueError("query must contain 1..200 characters")
         records, _, meta = self.network.get_json("FullTextSearch/SearchEstimatedRates", {"search": query})
         cards = norm_cards(records)
+        q_clean = query.strip()
+
+        for card in cards:
+            c_code = card.get("code", "")
+            c_name = card.get("name", "")
+            if c_code.casefold() == q_clean.casefold() or c_name.casefold() == q_clean.casefold():
+                card["match_status"] = "exact"
+            else:
+                card["match_status"] = "candidate"
+
         if full:
-            cards = [card for card in cards if card["code"] == query.strip()]
+            cards = [card for card in cards if card["code"].casefold() == q_clean.casefold()]
         else:
             cards = [
                 {k: v for k, v in card.items() if k not in {"resources", "work_steps"}} for card in cards
             ]
+
+        if not cards:
+            overall_status = "not_found"
+            msg = "Прямая норма ФСНБ через FGIS MCP не подтверждена"
+        elif any(c.get("match_status") == "exact" for c in cards):
+            overall_status = (
+                "exact"
+                if (full or any(c.get("code", "").casefold() == q_clean.casefold() for c in cards))
+                else "candidate"
+            )
+            msg = "Найдено точное совпадение нормы" if overall_status == "exact" else "Найдены кандидаты норм"
+        else:
+            overall_status = "candidate"
+            msg = "Найдены кандидаты норм (требуется проверка применимости и чтение состава работ/ресурсов)"
+
+        paged = page(cards, limit, offset)
         return {
-            **page(cards, limit, offset),
+            **paged,
+            "match_status": overall_status,
+            "message": msg,
+            "evidence": {
+                "source": "online_api",
+                "source_type": "SearchEstimatedRates",
+                "source_url": meta.get("source_url"),
+                "sha256": meta.get("sha256"),
+            },
             "provenance": {**meta, "fetched_at": now()},
             "edition_selection": "All returned publications retained; numeric record IDs do not prove currency",
             "coverage": "Pagination is local to this API response; upstream search completeness is unknown",
@@ -138,7 +173,7 @@ class Service:
             records = online_res.get("items", [])
 
         if not records:
-            raise ValueError(f"Norm {code} not found in dataset or online")
+            raise NotFoundError(f"Norm {code} not found in dataset or online")
 
         if len(records) == 1:
             return {
@@ -203,7 +238,9 @@ class Service:
             if not dataset_id and datasets:
                 dataset_id = datasets[0]["dataset_id"]
             elif not dataset_id:
-                raise ValueError("No local datasets available. Build or specify a dataset_id.")
+                raise LocalDatasetIncompleteError(
+                    "No local datasets available. Build or specify a dataset_id."
+                )
 
         data = Dataset(self.config.root, dataset_id)
         return data.norm_history(code, family=family, include_incomplete=include_incomplete)
@@ -222,7 +259,9 @@ class Service:
         if not dataset_id:
             datasets = self.datasets().get("items", [])
             if not datasets:
-                raise ValueError("No local datasets available. Build or specify a dataset_id.")
+                raise LocalDatasetIncompleteError(
+                    "No local datasets available. Build or specify a dataset_id."
+                )
             dataset_id = datasets[0]["dataset_id"]
 
         data = Dataset(self.config.root, dataset_id)
@@ -253,7 +292,7 @@ class Service:
         }
 
         if not norms_a and not norms_b:
-            raise ValueError(
+            raise NotFoundError(
                 f"No norms found for snapshots {snapshot_a} and {snapshot_b} in dataset {dataset_id}"
             )
 
@@ -468,11 +507,21 @@ class Service:
         doc, info = self.documents.get(document_guid, source)
         if table_index is not None:
             if table_index >= len(doc.get("tables", [])):
-                raise ValueError("Table index is outside this document")
+                raise NotFoundError("Table index is outside this document")
             tbl = doc["tables"][table_index]
             items = extract_coefficients_from_table(tbl, info, table_index=table_index)
         else:
             items = extract_document_coefficients(doc, info)
+
+        evidence = {
+            "source": source,
+            "source_type": "official_document",
+            "document": info.get("name"),
+            "document_guid": info.get("document_guid"),
+            "table_index": table_index,
+            "sha256": (info.get("provenance") or {}).get("sha256"),
+            "source_url": (info.get("provenance") or {}).get("source_url"),
+        }
 
         return {
             "document": info.get("name"),
@@ -480,6 +529,7 @@ class Service:
             "source": source,
             "total_extracted": len(items),
             "coefficients": items,
+            "evidence": evidence,
             "provenance": info.get("provenance"),
             "note": "Extracted coefficients preserve physical condition and note cells. Ambiguous rows are marked 'unresolved'.",
         }
@@ -494,7 +544,7 @@ class Service:
         if not dataset_id:
             datasets = self.datasets().get("items", [])
             if not datasets:
-                raise ValueError(
+                raise LocalDatasetIncompleteError(
                     "No local datasets available. Build or specify a dataset_id to query price history."
                 )
             dataset_id = datasets[0]["dataset_id"]

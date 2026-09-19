@@ -15,18 +15,15 @@ import truststore
 
 from . import __version__
 from .config import Config
+from .errors import FgisError
 
 HOST = "fgiscs.minstroyrf.ru"
 BASE = f"https://{HOST}/api/"
 
 
-class SourceError(RuntimeError):
+class SourceError(FgisError):
     def __init__(self, code: str, message: str, status: int | None = None):
-        self.code, self.status = code, status
-        super().__init__(message)
-
-    def as_dict(self):
-        return {"code": self.code, "message": str(self), "http_status": self.status}
+        super().__init__(code, message, status)
 
 
 class SameHostRedirect(HTTPRedirectHandler):

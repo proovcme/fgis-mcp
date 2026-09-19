@@ -324,6 +324,15 @@ def parse_base_xml_stream(
                         "xml_filename": xml_filename or f"{eff_family}.xml",
                         "xml_sha256": xml_sha256,
                     },
+                    "evidence": {
+                        "source": "opendata",
+                        "source_type": "fsnb_xml",
+                        "dataset_number": "7707082071-fsnb",
+                        "snapshot_uid": eff_snap_uid,
+                        "snapshot_id": snapshot_id,
+                        "xml_filename": xml_filename or f"{eff_family}.xml",
+                        "xml_sha256": xml_sha256,
+                    },
                     "raw_metadata": {
                         "base_name": base_name,
                         "program_name": program_name,
@@ -463,6 +472,17 @@ def parse_fsbc_xml_stream(
                         "resource_type": eff_type,
                         "xml_file": xml_filename
                         or ("ФСБЦ_Маш.xml" if eff_type == "machine" else "ФСБЦ_Мат&Оборуд.xml"),
+                        "xml_filename": xml_filename
+                        or ("ФСБЦ_Маш.xml" if eff_type == "machine" else "ФСБЦ_Мат&Оборуд.xml"),
+                        "xml_sha256": xml_sha256,
+                    },
+                    "evidence": {
+                        "source": "opendata",
+                        "source_type": "fsbc_xml",
+                        "dataset_number": "7707082071-fsnb",
+                        "snapshot_uid": eff_snap_uid,
+                        "snapshot_id": snapshot_id,
+                        "resource_type": eff_type,
                         "xml_filename": xml_filename
                         or ("ФСБЦ_Маш.xml" if eff_type == "machine" else "ФСБЦ_Мат&Оборуд.xml"),
                         "xml_sha256": xml_sha256,

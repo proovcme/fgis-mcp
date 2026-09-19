@@ -61,6 +61,14 @@ def norm_cards(records):
             "document_guid": record.get("normLegalDocPublishedGuid"),
             "record_sha256": digest,
         }
+        evidence = {
+            "source": "online_api",
+            "source_type": "SearchEstimatedRates",
+            "document": source["document"],
+            "document_guid": source["document_guid"],
+            "record_id": source["record_id"],
+            "sha256": digest,
+        }
         family = clean(record.get("documentTypeName"))
         by_code = {}
         for col in columns:
@@ -74,6 +82,7 @@ def norm_cards(records):
                 "name": clean(col.get("name") or col.get("Name")),
                 "unit": clean(col.get("meterName") or col.get("MeterName")),
                 "source": source,
+                "evidence": evidence,
                 "work_steps": [],
                 "resources": [],
                 "warnings": [],
@@ -103,6 +112,7 @@ def norm_cards(records):
                         "name": clean(quantity.get("NormName")),
                         "unit": None,
                         "source": source,
+                        "evidence": evidence,
                         "work_steps": [],
                         "resources": [],
                         "warnings": ["Norm column absent in search response; unit unavailable"],

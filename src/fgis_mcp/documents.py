@@ -273,6 +273,14 @@ class OnlineDocuments:
                     "SNAPSHOT_CHANGED", "Document changed; reopen without expected_sha256 and restart offsets"
                 )
             info = {k: v for k, v in doc.items() if k not in {"text", "blocks", "tables"}}
+            info["evidence"] = {
+                "source": source,
+                "source_type": "official_document",
+                "document": doc.get("name"),
+                "document_guid": document_guid,
+                "sha256": doc["provenance"].get("sha256"),
+                "source_url": doc["provenance"].get("source_url"),
+            }
             info.update(
                 total_characters=len(doc["text"]),
                 total_blocks=len(doc["blocks"]),
@@ -393,10 +401,20 @@ class OnlineDocuments:
                     else None,
                 }
             )
+        evidence = {
+            "source": source,
+            "source_type": "official_document_table",
+            "document": doc.get("name"),
+            "document_guid": document_guid,
+            "table_index": table_index,
+            "sha256": doc["provenance"].get("sha256"),
+            "source_url": doc["provenance"].get("source_url"),
+        }
         return (
             info
             | {k: v for k, v in table.items() if k != "rows"}
             | {
+                "evidence": evidence,
                 "row_offset": row_offset,
                 "total_rows": len(table["rows"]),
                 "rows": rows,
