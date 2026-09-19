@@ -206,70 +206,54 @@ def test_vor_section_5_arithmetic_control():
 
 
 def test_vor_section_5_mcp_workflow():
-    """VOR Section 5 evidence-first MCP workflow:
-    Strict universal logic: search -> read_norm -> compare factual technology -> classify candidate.
-    - Candidate status is NEVER assigned merely based on textual search match.
-    - Candidate status is only admissible after calling read_norm and comparing factual
-      work_steps, unit, resources, and scope against task requirements.
-    - Norms returned by search are evaluated factually: if their operations and technology
-      do not correspond to the task requirements (crane erection of cylindrical tiers at +24.35..+70.95 m),
-      they are rejected based on factual mismatch.
-    - No hardcoded collection blocklists or specific heuristics: evaluation is purely factual.
-    - Conclusion: Direct norm unconfirmed through FGIS MCP; no candidates matching the factual technology.
+    """VOR Section 5 evidence-first MCP workflow contract:
+    1. fgis_search_norms returns real results;
+    2. Every considered result is read via fgis_read_norm;
+    3. Each norm card contains: code, name, unit, work_steps, resources, evidence;
+    4. Search items retain match_status='candidate' (no premature exact match);
+    5. No codes absent from MCP results are used.
+    Technological comparison (VOR <-> norm scope <-> work steps <-> resources <-> unit)
+    is performed by the LLM agent from MCP evidence, not hardcoded via Python if.
     """
-
-    def matches_task_operations(card: dict, target_operations: list[str]) -> bool:
-        """Compares factual norm data (name + work_steps) with required operations."""
-        name = card.get("name", "").lower()
-        steps = " ".join(card.get("work_steps", [])).lower()
-        full_text = f"{name} {steps}"
-        return any(op.lower() in full_text for op in target_operations)
 
     async def run():
         params = get_client_params()
         async with Client(params) as client:
-            # 1. Direct search for VOR work
+            # 1. Direct search for VOR work returns not_found
             search_res = await client.call_tool(
                 "fgis_search_norms", {"query": "монтаж металлоконструкций ствола"}
             )
             assert not search_res.is_error
             search_data = json.loads(search_res.content[0].text)
             assert search_data["match_status"] == "not_found"
+            assert search_data["total"] == 0
 
-            # 2. Search for related keywords returns search results
-            kw_res = await client.call_tool("fgis_search_norms", {"query": "расстрел", "limit": 5})
+            # 2. Search for related terms returns candidate norms
+            kw_res = await client.call_tool("fgis_search_norms", {"query": "ствол", "limit": 5})
             assert not kw_res.is_error
-            kw_items = json.loads(kw_res.content[0].text).get("items", [])
+            kw_data = json.loads(kw_res.content[0].text)
+            assert kw_data["match_status"] == "candidate"
+            items = kw_data.get("items", [])
+            assert len(items) > 0
 
-            # 3. Universal principle: do NOT declare candidates by text match alone!
-            # Call read_norm for each item and compare factual technology.
-            target_ops = ["монтаж ярусов", "монтаж краном", "подъем ярусов", "башенный ствол"]
-            for item in kw_items:
+            # 3. Every considered search result is read via fgis_read_norm
+            for item in items:
                 code = item["code"]
+                assert item["match_status"] == "candidate"
+
                 read_res = await client.call_tool("fgis_read_norm", {"code": code})
                 assert not read_res.is_error
-                card = json.loads(read_res.content[0].text)["items"][0]
+                card_data = json.loads(read_res.content[0].text)
+                assert card_data.get("items"), f"Empty items for {code}"
+                card = card_data["items"][0]
 
-                # Factual comparison: work_steps ('Сболчивание расстрелов', 'Прочие работы')
-                # do not include crane tier erection operations.
-                assert not matches_task_operations(card, target_ops), (
-                    f"Norm {code} factually does not match required operations {target_ops}"
-                )
-
-            # 4. Check other potential structural norms
-            res_09 = await client.call_tool("fgis_search_norms", {"query": "09-01-001", "limit": 3})
-            assert not res_09.is_error
-            items_09 = json.loads(res_09.content[0].text).get("items", [])
-            for item in items_09:
-                read_res = await client.call_tool("fgis_read_norm", {"code": item["code"]})
-                assert not read_res.is_error
-                card = json.loads(read_res.content[0].text)["items"][0]
-                assert not matches_task_operations(card, target_ops), (
-                    f"Norm {item['code']} factually does not match required operations {target_ops}"
-                )
-
-            # Conclusion: Neither returned group of norms factually matches the required technology.
-            # Direct norm is unconfirmed through FGIS MCP:
-            # "Прямая норма ФСНБ через FGIS MCP не подтверждена"
+                # 4. Norm card must contain all required factual fields
+                assert card["code"] == code
+                assert "name" in card and card["name"]
+                assert "unit" in card and card["unit"]
+                assert "work_steps" in card and isinstance(card["work_steps"], list)
+                assert "resources" in card and isinstance(card["resources"], list)
+                assert "evidence" in card and isinstance(card["evidence"], dict)
+                assert "source" in card["evidence"]
 
     asyncio.run(run())
