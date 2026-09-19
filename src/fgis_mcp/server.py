@@ -150,13 +150,15 @@ def create_server(config):
         sources: list[str] | None = None,
         include_archive: bool = False,
         all_periods: bool = False,
+        opendata_version: str | None = None,
         max_tasks: int = 25000,
     ) -> dict:
         """Start durable download. Explicit queries, collection prefixes (each scans 01..99),
         price_books [{zone_id,period_id}]. No automatic all-Russia/history download.
         sources from fgis_sources traverses actual catalogues and downloads documents with technical parts.
         ['all_public'] selects all adapters; include_archive adds archived legal trees; all_periods includes
-        historical split forms (large). max_tasks bounds traversal; bounded jobs retain pending tasks.
+        historical split forms (large); opendata_version downloads only the specified FSNB snapshot/GUID/filename.
+        max_tasks bounds traversal; bounded jobs retain pending tasks.
         TER registry is not TER table content; bulk archive files require interactive portal CAPTCHA.
         Search enumeration cannot establish exhaustive FSNB coverage. Returns job/dataset ID.
         """
@@ -168,6 +170,7 @@ def create_server(config):
             sources=sources,
             include_archive=include_archive,
             all_periods=all_periods,
+            opendata_version=opendata_version,
             max_tasks=max_tasks,
         )
 
@@ -221,6 +224,95 @@ def create_server(config):
     def fgis_export_dataset(dataset_id: str, formats: list[str] | None = None) -> dict:
         """Export stopped dataset to jsonl and/or parquet. SQLite always exists; return files and hashes."""
         return service.export(dataset_id, formats if formats is not None else ["jsonl", "parquet"])
+
+    @server.tool(annotations=read)
+    def fgis_compare_norms(
+        code: str,
+        edition_a: str | None = None,
+        edition_b: str | None = None,
+        dataset_id: str | None = None,
+    ) -> dict:
+        """Compare two editions or publications of a norm code: differences in work steps, resources, units."""
+        return service.compare_norms(code, edition_a, edition_b, dataset_id)
+
+    @server.tool(annotations=read)
+    def fgis_extract_coefficients(
+        document_guid: str | None = None,
+        source: str = "normative",
+        table_index: int | None = None,
+    ) -> dict:
+        """Extract structured coefficient evidence and conditions from document technical parts.
+        Preserves condition text, note text, multipliers. If structure is ambiguous, returns status='unresolved'.
+        """
+        return service.extract_coefficients(document_guid, source, table_index)
+
+    @server.tool(annotations=read)
+    def fgis_price_history(
+        code: str,
+        dataset_id: str | None = None,
+        zone_id: int | None = None,
+        include_incomplete: bool = False,
+    ) -> dict:
+        """Query resource price timeline across all available periods in a dataset."""
+        return service.price_history(code, dataset_id, zone_id, include_incomplete=include_incomplete)
+
+    @server.tool(annotations=local)
+    def fgis_verify_dataset(dataset_id: str) -> dict:
+        """Strictly audit dataset completeness: verify totalCount proofs, task integrity, coverage matrix."""
+        return service.verify_dataset(dataset_id)
+
+    @server.tool(annotations=write)
+    def fgis_import_manual_file(
+        dataset_id: str,
+        file_path: str,
+        source: str = "ter",
+        edition: str | None = None,
+        note: str | None = None,
+    ) -> dict:
+        """Import manually downloaded official TER or archive file into a dataset with SHA-256 provenance."""
+        return service.import_manual_file(dataset_id, file_path, source, edition, note)
+
+    @server.tool(annotations=read)
+    def fgis_norm_history(
+        code: str,
+        dataset_id: str | None = None,
+        family: str | None = None,
+        include_incomplete: bool = False,
+    ) -> dict:
+        """Retrieve complete historical editions of a norm across all imported snapshots with transition diffs."""
+        return service.norm_history(code, dataset_id, family=family, include_incomplete=include_incomplete)
+
+    @server.tool(annotations=read)
+    def fgis_compare_snapshots(
+        snapshot_a: str,
+        snapshot_b: str,
+        dataset_id: str | None = None,
+        family: str | None = None,
+        include_incomplete: bool = False,
+    ) -> dict:
+        """Compare two entire FSNB editions in a dataset: counts of added, removed, modified, and identical norms."""
+        return service.compare_snapshots(
+            snapshot_a, snapshot_b, dataset_id, family, include_incomplete=include_incomplete
+        )
+
+    @server.tool(annotations=write)
+    def fgis_import_opendata(
+        archive_path: str,
+        dataset_id: str | None = None,
+        snapshot_id: str | None = None,
+    ) -> dict:
+        """Import an official OpenData FSNB/FSBC ZIP distribution archive with streaming XML parsing."""
+        return service.import_opendata_archive(archive_path, dataset_id, snapshot_id)
+
+    @server.tool(annotations=read)
+    def fgis_opendata_list() -> dict:
+        """List official OpenData datasets and passports (FSNB-2022, FSNB-2020 / FER)."""
+        return service.opendata_list()
+
+    @server.tool(annotations=read)
+    def fgis_opendata_get(dataset_number: str) -> dict:
+        """Fetch official OpenData passport metadata, versions, and file distributions."""
+        return service.opendata_get(dataset_number)
 
     @server.resource("fgis://help")
     def help_resource() -> str:

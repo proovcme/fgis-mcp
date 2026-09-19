@@ -79,18 +79,23 @@ ALL_SOURCES = [
     "salaries",
     "split_forms",
     "current_prices",
+    "opendata",
 ]
 
 
 def inventory():
+    from .coverage import source_capability
+
     return {
         "sources": ALL_SOURCES,
         "scope": "Public estimating data, not personal accounts or price monitoring submissions",
+        "coverage_matrix": {s: source_capability(s) for s in ALL_SOURCES},
         "known_limits": {
             "ter": "Registry sections 6 and 7; external links are retained, not fetched automatically",
             "coefficients": "Contained in full technical parts and methodological documents; no rule inference",
             "archive_files": "Catalogue only; portal download requires interactive CAPTCHA",
             "split_forms": "Explicit region/zone/period or all-period discovery; potentially very large",
+            "opendata": "Official passports and dataset file distributions (FSNB-2022 / FSNB-2020)",
         },
     }
 
@@ -105,13 +110,27 @@ def guid(value):
     return str(parsed)
 
 
-def task_roots(sources, include_archive=False, all_periods=False):
+def task_roots(sources, include_archive=False, all_periods=False, opendata_version=None):
     if sources == ["all_public"]:
         sources = ALL_SOURCES
     if not sources or any(s not in ALL_SOURCES for s in sources):
         raise ValueError("Choose named sources from fgis_sources, or ['all_public']")
     tasks = []
     for source in dict.fromkeys(sources):
+        if source == "opendata":
+            from . import opendata
+
+            for num in opendata.KNOWN_OPENDATA_DATASETS:
+                tasks.append(
+                    {
+                        "kind": "catalog",
+                        "source": "opendata",
+                        "dataset_number": num,
+                        **({"include_archive": True} if include_archive or opendata_version else {}),
+                        **({"opendata_version": str(opendata_version)} if opendata_version else {}),
+                    }
+                )
+            continue
         tasks.append(
             {
                 "kind": "catalog",
@@ -184,6 +203,14 @@ def request(task):
         if "region_id" in task:
             return "EstimatedPrice/PriceZones", {"subjectId": task["region_id"]}
         return "EstimatedPrice/CountrySubjects", {}
+    if source == "opendata":
+        import urllib.parse
+
+        from .opendata import resolve_dataset_number
+
+        num = task.get("dataset_number", "7707082071-fsnb")
+        resolved = resolve_dataset_number(str(num))
+        return "OpenData/GetByNumber/" + urllib.parse.quote(resolved), {}
     raise ValueError("Unsupported source")
 
 
@@ -193,6 +220,8 @@ def items_from(payload, task):
     if isinstance(payload, dict):
         if task["source"] in PIR and "documents" in payload:
             return payload["documents"]
+        if task["source"] == "opendata":
+            return payload.get("data") or payload.get("files") or [payload]
         for key in (str(task.get("parent", "")), "items", "types"):
             if isinstance(payload.get(key), list):
                 return payload[key]
@@ -295,6 +324,51 @@ def children(payload, task):
             out.extend({**task, "zone_id": r["id"]} for r in rows)
         else:
             out.extend({**task, "region_id": r["id"]} for r in rows)
+    elif source == "opendata":
+        from . import opendata, opendata_xml
+
+        if "dataset_number" not in task:
+            out.extend({**task, "dataset_number": num} for num in opendata.KNOWN_OPENDATA_DATASETS)
+        else:
+            passport = opendata.normalize_passport(payload, task["dataset_number"])
+            all_files = passport.get("files", [])
+            target_version = task.get("opendata_version")
+            if target_version:
+                tv = str(target_version).strip().casefold()
+                selected_files = []
+                for f in all_files:
+                    fname = str(f.get("name", "")).casefold()
+                    furl = str(f.get("source_url", "")).casefold()
+                    snap = opendata_xml.extract_snapshot_id(fname or furl).casefold()
+                    if tv in fname or tv in furl or tv == snap:
+                        selected_files.append(f)
+                if not selected_files:
+                    selected_files = [f for f in all_files if tv in str(f.get("source_url", "")).casefold()]
+            elif not task.get("include_archive"):
+                selected_files = [f for f in all_files if f.get("is_current")] or all_files[:1]
+            else:
+                selected_files = all_files
+            for f in selected_files:
+                guid_val = (
+                    f.get("guid")
+                    or f.get("distribution_guid")
+                    or f.get("document_guid")
+                    or f.get("file_guid")
+                )
+                if not guid_val and "/values/GetFileContent/" in f.get("source_url", ""):
+                    guid_val = f["source_url"].split("/values/GetFileContent/")[-1].strip()
+                child_task = {
+                    "kind": "opendata_file",
+                    "source": "opendata",
+                    "dataset_number": task["dataset_number"],
+                    "file_url": f["source_url"],
+                    "format": f.get("format", "bin"),
+                    "name": f.get("name", ""),
+                }
+                if guid_val:
+                    child_task["guid"] = guid_val
+                    child_task["distribution_guid"] = guid_val
+                out.append(child_task)
     return out
 
 
@@ -325,13 +399,14 @@ def browse(
         "materials",
         "year",
         "fsnb_type",
+        "dataset_number",
     }
     for key, value in (source_params or {}).items():
         if key not in allowed:
             raise ValueError("Unknown source parameter")
-        if key == "stage":
+        if key in {"stage", "dataset_number"}:
             if not isinstance(value, str):
-                raise ValueError("stage must be a string")
+                raise ValueError(f"{key} must be a string")
         elif key == "materials":
             if type(value) is not bool:
                 raise ValueError("materials must be boolean")
@@ -346,13 +421,26 @@ def browse(
     payload, _, meta = network.get_value(*request(task))
     rows = items_from(payload, task)
     # Large norm/resource JSON remains accessible via download and document tools.
-    summaries = [
-        {k: v for k, v in row.items() if not k.endswith("Json") and k != "fullPublishedText"}
-        | {"document_refs": document_refs(row, source)}
-        if isinstance(row, dict)
-        else row
-        for row in rows
-    ]
+    summaries = []
+    for row in rows:
+        if isinstance(row, dict):
+            item = {k: v for k, v in row.items() if not k.endswith("Json") and k != "fullPublishedText"}
+            item["document_refs"] = document_refs(row, source)
+            if row.get("urlUrl"):
+                url = str(row["urlUrl"])
+                is_direct = any(
+                    url.lower().endswith(ext) for ext in (".zip", ".rar", ".7z", ".pdf", ".xls", ".xlsx")
+                )
+                item["external_link_classification"] = {
+                    "url": url,
+                    "type": "direct_file" if is_direct else "regional_portal",
+                    "requires_manual_download": True,
+                    "note": "TER external link; download manually and import via fgis_import_manual_file",
+                }
+            summaries.append(item)
+        else:
+            summaries.append(row)
+
     return paginate(summaries, limit, offset) | {
         "source": source,
         "document_refs": [{"source": source}] if source in {"fssc", "fsem"} else [],

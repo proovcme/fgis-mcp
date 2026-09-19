@@ -165,6 +165,225 @@ def execute(config, job_id, network=None):
                                 data.add_document(
                                     key, {"name": task["guid"], "file": receipt["raw_file"]}, receipt
                                 )
+                            elif task["kind"] == "opendata_passport":
+                                from . import opendata
+
+                                norm_passport, body, meta = opendata.fetch_passport(
+                                    network, task["dataset_number"]
+                                )
+                                receipt = {
+                                    **meta,
+                                    "fetched_at": now(),
+                                    "request": task,
+                                    "raw_file": data.raw(body, "json"),
+                                }
+                                all_files = norm_passport.get("files", [])
+                                if not task.get("include_archive"):
+                                    selected_files = [
+                                        f for f in all_files if f.get("is_current")
+                                    ] or all_files[:1]
+                                else:
+                                    selected_files = all_files
+                                receipt["children"] = []
+                                for f in selected_files:
+                                    guid_val = (
+                                        f.get("guid")
+                                        or f.get("distribution_guid")
+                                        or f.get("document_guid")
+                                        or f.get("file_guid")
+                                    )
+                                    if not guid_val and "/values/GetFileContent/" in f.get("source_url", ""):
+                                        guid_val = (
+                                            f["source_url"].split("/values/GetFileContent/")[-1].strip()
+                                        )
+                                    child_entry = {
+                                        "kind": "opendata_file",
+                                        "source": "opendata",
+                                        "dataset_number": task["dataset_number"],
+                                        "file_url": f["source_url"],
+                                        "format": f.get("format", "bin"),
+                                        "name": f.get("name", ""),
+                                    }
+                                    if guid_val:
+                                        child_entry["guid"] = guid_val
+                                        child_entry["distribution_guid"] = guid_val
+                                    receipt["children"].append(child_entry)
+                                data.add_document(key, norm_passport, receipt)
+                            elif task["kind"] in {"opendata_file", "opendata_snapshot"}:
+                                from . import opendata_xml
+
+                                file_url = task.get("file_url") or ""
+                                if not file_url and task.get("guid"):
+                                    file_url = f"values/GetFileContent/{task['guid']}"
+                                rel_path = file_url
+                                if rel_path.startswith("https://fgiscs.minstroyrf.ru/api/"):
+                                    rel_path = rel_path.replace("https://fgiscs.minstroyrf.ru/api/", "")
+                                elif rel_path.startswith("/api/"):
+                                    rel_path = rel_path.replace("/api/", "")
+                                body, meta = network.fetch(rel_path, file=True)
+                                suffix = (task.get("format") or "bin").lower()
+                                raw_rel = data.raw(body, suffix)
+                                receipt = {
+                                    **meta,
+                                    "fetched_at": now(),
+                                    "request": task,
+                                    "raw_file": raw_rel,
+                                }
+                                is_fsnb_zip = suffix == "zip" or body.startswith(b"PK\x03\x04")
+                                if is_fsnb_zip:
+                                    zip_path = data.path / raw_rel
+                                    archive_sha = meta["sha256"]
+                                    dist_guid = task.get("distribution_guid") or task.get("guid")
+                                    snapshot_id = task.get("snapshot_id") or opendata_xml.extract_snapshot_id(
+                                        task.get("name", "") or file_url
+                                    )
+                                    ds_num = task.get("dataset_number", "7707082071-fsnb")
+
+                                    # Check safe re-import strictly scoped to dataset_number
+                                    with data.connect() as conn:
+                                        existing = conn.execute(
+                                            """SELECT snapshot_uid, snapshot_id, total_norms, total_fsbc, proof
+                                            FROM snapshots
+                                            WHERE dataset_number=? AND (archive_sha256=? OR sha256=?) AND status='complete'""",
+                                            (ds_num, archive_sha, archive_sha),
+                                        ).fetchone()
+                                        if existing:
+                                            receipt["snapshot_uid"] = existing[0]
+                                            receipt["snapshot_id"] = existing[1]
+                                            receipt["total_norms"] = existing[2]
+                                            receipt["total_fsbc"] = existing[3]
+                                            receipt["proof"] = json.loads(existing[4]) if existing[4] else {}
+                                            data.add_document(
+                                                key,
+                                                {
+                                                    "name": task.get("name")
+                                                    or task.get("dataset_number", "opendata"),
+                                                    "kind": "opendata_archive",
+                                                    "snapshot_uid": existing[0],
+                                                    "snapshot_id": existing[1],
+                                                },
+                                                receipt,
+                                            )
+                                            continue
+
+                                    reader = opendata_xml.FsnbArchiveReader(
+                                        zip_path,
+                                        snapshot_id=snapshot_id,
+                                        distribution_guid=dist_guid,
+                                        dataset_number=ds_num,
+                                        archive_sha256=archive_sha,
+                                    )
+                                    snap_uid = reader.snapshot_uid
+                                    snapshot_meta = {
+                                        "snapshot_uid": snap_uid,
+                                        "snapshot_id": snapshot_id,
+                                        "dataset_number": ds_num,
+                                        "distribution_guid": dist_guid,
+                                        "archive_sha256": archive_sha,
+                                        "file_name": task.get("name", ""),
+                                        "guid": dist_guid,
+                                        "sha256": archive_sha,
+                                        "archive_size": len(body),
+                                        "approval_date": reader.approval_date,
+                                        "effective_from": reader.effective_from,
+                                        "xml_files": reader.inventory,
+                                    }
+                                    data.register_snapshot(snapshot_meta, status="importing", receipt=receipt)
+
+                                    # Stream norms in bounded batches
+                                    norm_batch = []
+                                    seen_norm_ids = set()
+                                    duplicate_norm_ids = 0
+                                    total_norms = 0
+                                    try:
+                                        for norm_card in reader.iter_norms():
+                                            nid = norm_card["norm_id"]
+                                            if nid in seen_norm_ids:
+                                                duplicate_norm_ids += 1
+                                            seen_norm_ids.add(nid)
+                                            norm_batch.append(norm_card)
+                                            if len(norm_batch) >= 1000:
+                                                data.add_norms(
+                                                    f"sub:{key}:norms:{total_norms}",
+                                                    norm_batch,
+                                                    receipt,
+                                                    save_receipt=False,
+                                                )
+                                                total_norms += len(norm_batch)
+                                                norm_batch = []
+                                        if norm_batch:
+                                            data.add_norms(
+                                                f"sub:{key}:norms:{total_norms}",
+                                                norm_batch,
+                                                receipt,
+                                                save_receipt=False,
+                                            )
+                                            total_norms += len(norm_batch)
+
+                                        # Stream FSBC in bounded batches
+                                        fsbc_batch = []
+                                        seen_fsbc_ids = set()
+                                        duplicate_fsbc_ids = 0
+                                        total_fsbc = 0
+                                        for fsbc_item in reader.iter_fsbc():
+                                            fid = fsbc_item["fsbc_id"]
+                                            if fid in seen_fsbc_ids:
+                                                duplicate_fsbc_ids += 1
+                                            seen_fsbc_ids.add(fid)
+                                            fsbc_batch.append(fsbc_item)
+                                            if len(fsbc_batch) >= 1000:
+                                                data.add_fsbc(
+                                                    f"sub:{key}:fsbc:{total_fsbc}",
+                                                    fsbc_batch,
+                                                    receipt,
+                                                    save_receipt=False,
+                                                )
+                                                total_fsbc += len(fsbc_batch)
+                                                fsbc_batch = []
+                                        if fsbc_batch:
+                                            data.add_fsbc(
+                                                f"sub:{key}:fsbc:{total_fsbc}",
+                                                fsbc_batch,
+                                                receipt,
+                                                save_receipt=False,
+                                            )
+                                            total_fsbc += len(fsbc_batch)
+
+                                        proof = reader.evaluate_proof(
+                                            total_norms=total_norms,
+                                            total_fsbc=total_fsbc,
+                                            duplicate_norm_ids=duplicate_norm_ids,
+                                            duplicate_fsbc_ids=duplicate_fsbc_ids,
+                                        )
+                                        data.finish_snapshot(
+                                            snap_uid,
+                                            total_norms=total_norms,
+                                            total_fsbc=total_fsbc,
+                                            proof=proof,
+                                            status="complete",
+                                            approval_date=reader.approval_date,
+                                            effective_from=reader.effective_from,
+                                        )
+                                        receipt["snapshot_uid"] = snap_uid
+                                        receipt["snapshot_id"] = snapshot_id
+                                        receipt["total_norms"] = total_norms
+                                        receipt["total_fsbc"] = total_fsbc
+                                        receipt["xml_inventory"] = reader.inventory
+                                        receipt["proof"] = proof
+                                    except Exception as exc:
+                                        data.fail_snapshot(snap_uid, error=str(exc))
+                                        raise
+
+                                data.add_document(
+                                    key,
+                                    {
+                                        "name": task.get("name") or task.get("dataset_number", "opendata"),
+                                        "file": receipt["raw_file"],
+                                        "size": len(body),
+                                        "format": suffix,
+                                    },
+                                    receipt,
+                                )
                             else:
                                 raise ValueError("Unknown task kind")
                         for child in receipt.get("children", []):
