@@ -47,6 +47,8 @@ def main():
             "audit",
             "verify",
             "import",
+            "import-opendata",
+            "norm-history",
         ],
     )
     parser.add_argument("--transport", choices=["stdio", "streamable-http"], default="stdio")
@@ -62,6 +64,8 @@ def main():
     parser.add_argument("--period", type=int)
     parser.add_argument("--id")
     parser.add_argument("--file")
+    parser.add_argument("--code")
+    parser.add_argument("--snapshot")
     parser.add_argument("--edition")
     parser.add_argument("--note")
     parser.add_argument("--output")
@@ -126,6 +130,14 @@ def main():
             result = service.import_manual_file(
                 args.id, args.file, source=src, edition=args.edition, note=args.note
             )
+        elif args.command == "import-opendata":
+            if not args.file:
+                parser.error("import-opendata requires --file <archive_path>")
+            result = service.import_opendata_archive(args.file, dataset_id=args.id, snapshot_id=args.snapshot)
+        elif args.command == "norm-history":
+            if not args.code:
+                parser.error("norm-history requires --code <norm_code>")
+            result = service.norm_history(args.code, dataset_id=args.id)
         elif args.command == "audit":
             from pathlib import Path
 

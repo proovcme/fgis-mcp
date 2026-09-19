@@ -118,15 +118,27 @@ class Service:
     ):
         from .compare import compare_norms
 
+        records = []
         if dataset_id:
             data = Dataset(self.config.root, dataset_id)
-            records = data.query(kind="norms", code=code, limit=100).get("items", [])
+            res = data.query(kind="norms", code=code)
+            records = res.get("items", [])
         else:
-            online_res = self.online(code, limit=100, full=True)
+            datasets = self.datasets().get("items", [])
+            for d in datasets:
+                data = Dataset(self.config.root, d["dataset_id"])
+                res = data.query(kind="norms", code=code)
+                if res.get("items"):
+                    records = res.get("items", [])
+                    break
+
+        if not records:
+            # Fallback to online search if dataset has no records
+            online_res = self.online(code, full=True)
             records = online_res.get("items", [])
 
         if not records:
-            raise ValueError(f"No norm records found for code: {code}")
+            raise ValueError(f"Norm {code} not found in dataset or online")
 
         if len(records) == 1:
             return {
@@ -143,14 +155,191 @@ class Service:
             for r in records:
                 doc = (r.get("source") or {}).get("document", "")
                 guid_val = (r.get("source") or {}).get("document_guid", "")
-                if edition_a and (edition_a in doc or edition_a == guid_val) and card_a is None:
+                snap_val = str(r.get("snapshot_id") or "")
+                decree_val = str(r.get("decree") or "")
+                norm_id_val = str(r.get("norm_id") or "")
+
+                matches_a = edition_a and (
+                    edition_a in doc
+                    or edition_a == guid_val
+                    or edition_a in snap_val
+                    or edition_a in decree_val
+                    or edition_a in norm_id_val
+                )
+                matches_b = edition_b and (
+                    edition_b in doc
+                    or edition_b == guid_val
+                    or edition_b in snap_val
+                    or edition_b in decree_val
+                    or edition_b in norm_id_val
+                )
+                if matches_a and card_a is None:
                     card_a = r
-                elif edition_b and (edition_b in doc or edition_b == guid_val) and card_b is None:
+                elif matches_b and card_b is None:
                     card_b = r
 
         card_a = card_a or records[0]
-        card_b = card_b or records[1]
+        card_b = card_b or records[-1]
         return compare_norms(card_a, card_b)
+
+    def norm_history(self, code: str, dataset_id: str | None = None, family: str | None = None):
+        if not dataset_id:
+            datasets = self.datasets().get("items", [])
+            for d in datasets:
+                data = Dataset(self.config.root, d["dataset_id"])
+                res = data.query(kind="norms", code=code)
+                if res.get("items"):
+                    dataset_id = d["dataset_id"]
+                    break
+            if not dataset_id and datasets:
+                dataset_id = datasets[0]["dataset_id"]
+            elif not dataset_id:
+                raise ValueError("No local datasets available. Build or specify a dataset_id.")
+
+        data = Dataset(self.config.root, dataset_id)
+        return data.norm_history(code, family=family)
+
+    def compare_snapshots(
+        self,
+        snapshot_a: str,
+        snapshot_b: str,
+        dataset_id: str | None = None,
+        family: str | None = None,
+    ):
+        from .opendata_xml import compare_fsnb_editions
+
+        if not dataset_id:
+            datasets = self.datasets().get("items", [])
+            if not datasets:
+                raise ValueError("No local datasets available. Build or specify a dataset_id.")
+            dataset_id = datasets[0]["dataset_id"]
+
+        data = Dataset(self.config.root, dataset_id)
+        with data.connect() as conn:
+            query = "SELECT payload FROM norms WHERE norm_id LIKE ?"
+            params_a = [f"{snapshot_a}:%"]
+            params_b = [f"{snapshot_b}:%"]
+            if family:
+                query += " AND family=?"
+                params_a.append(family)
+                params_b.append(family)
+
+            rows_a = conn.execute(query, params_a).fetchall()
+            rows_b = conn.execute(query, params_b).fetchall()
+
+        norms_a = {item["code"]: item for item in (json.loads(r[0]) for r in rows_a)}
+        norms_b = {item["code"]: item for item in (json.loads(r[0]) for r in rows_b)}
+
+        if not norms_a and not norms_b:
+            raise ValueError(
+                f"No norms found for snapshots {snapshot_a} and {snapshot_b} in dataset {dataset_id}"
+            )
+
+        return compare_fsnb_editions(norms_a, norms_b, v1_snapshot_id=snapshot_a, v2_snapshot_id=snapshot_b)
+
+    def import_opendata_archive(
+        self,
+        archive_path: str,
+        dataset_id: str | None = None,
+        snapshot_id: str | None = None,
+    ):
+        import hashlib
+        import uuid
+        from pathlib import Path
+
+        from .opendata_xml import FsnbArchiveReader
+        from .storage import now
+
+        path = Path(archive_path).expanduser().resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"OpenData archive not found: {archive_path}")
+
+        if not dataset_id:
+            datasets = self.datasets().get("items", [])
+            if datasets:
+                dataset_id = datasets[0]["dataset_id"]
+            else:
+                dataset_id = uuid.uuid4().hex
+                Dataset(self.config.root, dataset_id, create=True)
+        else:
+            data_dir = self.config.root / "datasets" / dataset_id
+            if not data_dir.is_dir():
+                Dataset(self.config.root, dataset_id, create=True)
+
+        data = Dataset(self.config.root, dataset_id)
+        reader = FsnbArchiveReader(path, snapshot_id=snapshot_id)
+        snap_id = reader.snapshot_id
+
+        # Copy archive into raw for lossless provenance
+        raw_body = path.read_bytes()
+        raw_rel = data.raw(raw_body, "zip")
+        h = hashlib.sha256(raw_body).hexdigest()
+
+        receipt = {
+            "source_url": f"file://{path.name}",
+            "sha256": h,
+            "bytes": len(raw_body),
+            "fetched_at": now(),
+            "request": {
+                "kind": "opendata_snapshot",
+                "source": "opendata",
+                "archive_path": str(path),
+                "snapshot_id": snap_id,
+            },
+            "raw_file": raw_rel,
+            "xml_inventory": reader.inventory,
+        }
+
+        # Stream norms in batches
+        norm_batch = []
+        total_norms = 0
+        for norm_card in reader.iter_norms():
+            norm_batch.append(norm_card)
+            if len(norm_batch) >= 1000:
+                data.add_norms(
+                    f"opendata:{snap_id}:norms:{total_norms}", norm_batch, receipt, save_receipt=False
+                )
+                total_norms += len(norm_batch)
+                norm_batch = []
+        if norm_batch:
+            data.add_norms(f"opendata:{snap_id}:norms:{total_norms}", norm_batch, receipt, save_receipt=False)
+            total_norms += len(norm_batch)
+
+        # Stream FSBC in batches
+        fsbc_batch = []
+        total_fsbc = 0
+        for fsbc_item in reader.iter_fsbc():
+            fsbc_batch.append(fsbc_item)
+            if len(fsbc_batch) >= 1000:
+                data.add_fsbc(
+                    f"opendata:{snap_id}:fsbc:{total_fsbc}", fsbc_batch, receipt, save_receipt=False
+                )
+                total_fsbc += len(fsbc_batch)
+                fsbc_batch = []
+        if fsbc_batch:
+            data.add_fsbc(f"opendata:{snap_id}:fsbc:{total_fsbc}", fsbc_batch, receipt, save_receipt=False)
+            total_fsbc += len(fsbc_batch)
+
+        snapshot_meta = {
+            "snapshot_id": snap_id,
+            "dataset_number": "7707082071-fsnb",
+            "file_name": path.name,
+            "sha256": h,
+            "total_norms": total_norms,
+            "total_fsbc": total_fsbc,
+            "xml_files": reader.inventory,
+        }
+        data.add_snapshot(snapshot_meta, receipt)
+
+        return {
+            "dataset_id": dataset_id,
+            "snapshot_id": snap_id,
+            "total_norms": total_norms,
+            "total_fsbc": total_fsbc,
+            "xml_inventory": reader.inventory,
+            "sha256": h,
+            "status": "imported",
+        }
 
     def extract_coefficients(
         self,

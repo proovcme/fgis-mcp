@@ -38,6 +38,9 @@ def test_stdio_discovery_and_offline_call(tmp_path, mode):
                 "fgis_import_manual_file",
                 "fgis_opendata_list",
                 "fgis_opendata_get",
+                "fgis_norm_history",
+                "fgis_compare_snapshots",
+                "fgis_import_opendata",
             }.issubset({t.name for t in listed.tools})
             result = await client.call_tool("fgis_list_datasets", {})
             assert not result.is_error

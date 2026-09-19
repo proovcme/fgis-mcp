@@ -265,6 +265,34 @@ def create_server(config):
         return service.import_manual_file(dataset_id, file_path, source, edition, note)
 
     @server.tool(annotations=read)
+    def fgis_norm_history(
+        code: str,
+        dataset_id: str | None = None,
+        family: str | None = None,
+    ) -> dict:
+        """Retrieve complete historical editions of a norm across all imported snapshots with transition diffs."""
+        return service.norm_history(code, dataset_id, family=family)
+
+    @server.tool(annotations=read)
+    def fgis_compare_snapshots(
+        snapshot_a: str,
+        snapshot_b: str,
+        dataset_id: str | None = None,
+        family: str | None = None,
+    ) -> dict:
+        """Compare two entire FSNB editions in a dataset: counts of added, removed, modified, and identical norms."""
+        return service.compare_snapshots(snapshot_a, snapshot_b, dataset_id, family)
+
+    @server.tool(annotations=write)
+    def fgis_import_opendata(
+        archive_path: str,
+        dataset_id: str | None = None,
+        snapshot_id: str | None = None,
+    ) -> dict:
+        """Import an official OpenData FSNB/FSBC ZIP distribution archive with streaming XML parsing."""
+        return service.import_opendata_archive(archive_path, dataset_id, snapshot_id)
+
+    @server.tool(annotations=read)
     def fgis_opendata_list() -> dict:
         """List official OpenData datasets and passports (FSNB-2022, FSNB-2020 / FER)."""
         return service.opendata_list()
