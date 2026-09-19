@@ -40,7 +40,13 @@ fgis-mcp verify --id <dataset_id>
 # Импортировать вручную скачанный официальный файл ТЕР или архив с расчетом SHA-256
 fgis-mcp import --id <dataset_id> --file /path/to/ter_spb.xlsx --source ter --edition "2026.1"
 
-# Экспорт датасета в форматы JSONL и Parquet
+# Потоковый импорт архива среза OpenData ФСНБ (ZIP) с парсингом норм и ФСБЦ
+fgis-mcp import-opendata --id <dataset_id> --archive /path/to/data-20260812-structure-20240216.zip
+
+# Просмотреть историю редакций нормы и вычисленные диффы
+fgis-mcp norm-history --id <dataset_id> --code 01-01-001-01 --family ГЭСН
+
+# Экспорт датасета в форматы JSONL и Parquet (включая fsbc)
 fgis-mcp export --id <dataset_id> --format jsonl --format parquet
 ```
 

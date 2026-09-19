@@ -121,7 +121,14 @@ def task_roots(sources, include_archive=False, all_periods=False):
             from . import opendata
 
             for num in opendata.KNOWN_OPENDATA_DATASETS:
-                tasks.append({"kind": "catalog", "source": "opendata", "dataset_number": num})
+                tasks.append(
+                    {
+                        "kind": "catalog",
+                        "source": "opendata",
+                        "dataset_number": num,
+                        **({"include_archive": True} if include_archive else {}),
+                    }
+                )
             continue
         tasks.append(
             {
@@ -323,7 +330,12 @@ def children(payload, task):
             out.extend({**task, "dataset_number": num} for num in opendata.KNOWN_OPENDATA_DATASETS)
         else:
             passport = opendata.normalize_passport(payload, task["dataset_number"])
-            for f in passport.get("files", []):
+            all_files = passport.get("files", [])
+            if not task.get("include_archive"):
+                selected_files = [f for f in all_files if f.get("is_current")] or all_files[:1]
+            else:
+                selected_files = all_files
+            for f in selected_files:
                 out.append(
                     {
                         "kind": "opendata_file",
@@ -331,6 +343,7 @@ def children(payload, task):
                         "dataset_number": task["dataset_number"],
                         "file_url": f["source_url"],
                         "format": f.get("format", "bin"),
+                        "name": f.get("name", ""),
                     }
                 )
     return out

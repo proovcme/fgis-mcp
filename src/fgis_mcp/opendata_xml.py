@@ -61,6 +61,10 @@ def extract_snapshot_id(filename_or_name: str) -> str:
     match_any_date = re.search(r"(?<!\d)(20\d{6})(?!\d)", filename_or_name)
     if match_any_date:
         return match_any_date.group(1)
+    match_ru_date = re.search(r"(\d{2})\.(\d{2})\.(20\d{2})", filename_or_name)
+    if match_ru_date:
+        d, m, y = match_ru_date.groups()
+        return f"{y}{m}{d}"
     # Clean fallback alphanumeric identifier
     cleaned = re.sub(r"[^a-zA-Z0-9_-]", "_", filename_or_name).strip("_")
     return cleaned[:32] if cleaned else "unknown_snapshot"
@@ -377,6 +381,13 @@ class FsnbArchiveReader:
     def _inspect(self) -> None:
         with zipfile.ZipFile(self.zip_path) as archive:
             check_zip_safety(archive)
+            if not re.fullmatch(r"\d{8}", self.snapshot_id):
+                for info in archive.infolist():
+                    cand = extract_snapshot_id(info.filename)
+                    if re.fullmatch(r"\d{8}", cand):
+                        self.snapshot_id = cand
+                        break
+
             for info in archive.infolist():
                 base_name = Path(info.filename).name
                 if base_name in ALL_KNOWN_XML:

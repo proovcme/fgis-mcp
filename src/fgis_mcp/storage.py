@@ -424,6 +424,7 @@ class Dataset:
                         "price_current": None,
                         "index": None,
                         "type": "fsbc_base_price",
+                        "source": "fsbc",
                         "resource_type": item.get("resource_type"),
                         "provenance": item.get("provenance"),
                     }

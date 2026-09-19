@@ -177,6 +177,13 @@ def execute(config, job_id, network=None):
                                     "request": task,
                                     "raw_file": data.raw(body, "json"),
                                 }
+                                all_files = norm_passport.get("files", [])
+                                if not task.get("include_archive"):
+                                    selected_files = [
+                                        f for f in all_files if f.get("is_current")
+                                    ] or all_files[:1]
+                                else:
+                                    selected_files = all_files
                                 receipt["children"] = [
                                     {
                                         "kind": "opendata_file",
@@ -184,8 +191,9 @@ def execute(config, job_id, network=None):
                                         "dataset_number": task["dataset_number"],
                                         "file_url": f["source_url"],
                                         "format": f.get("format", "bin"),
+                                        "name": f.get("name", ""),
                                     }
-                                    for f in norm_passport.get("files", [])
+                                    for f in selected_files
                                 ]
                                 data.add_document(key, norm_passport, receipt)
                             elif task["kind"] in {"opendata_file", "opendata_snapshot"}:

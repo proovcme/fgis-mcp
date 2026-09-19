@@ -99,6 +99,7 @@ def normalize_passport(raw: dict[str, Any], number: str) -> dict[str, Any]:
                 "version": version or "current",
                 "description": "Актуальный файл набора данных",
                 "date": update_date,
+                "is_current": True,
             }
         )
 
@@ -115,6 +116,7 @@ def normalize_passport(raw: dict[str, Any], number: str) -> dict[str, Any]:
                     "version": vname,
                     "description": "Версионный файл набора данных",
                     "date": "",
+                    "is_current": False,
                 }
             )
 
@@ -297,15 +299,19 @@ def cross_check_opendata_with_api(
         if diffs:
             same_id_different_metadata.append({"id": shared_id, "differences": diffs})
 
+    api_names = [clean(r.get("name") or r.get("documentName") or "") for r in api_data if isinstance(r, dict)]
+    matching_nodes = [name for name in api_names if opendata_version and opendata_version in name]
+
     discrepancies = []
     if isinstance(opendata_data, dict):
         if opendata_files_count == 0 and len(api_data) > 0:
             discrepancies.append(
                 "OpenData passport contains no file distributions, but API catalog has active nodes"
             )
-
-    api_names = [clean(r.get("name") or r.get("documentName") or "") for r in api_data if isinstance(r, dict)]
-    matching_nodes = [name for name in api_names if opendata_version and opendata_version in name]
+        if opendata_version and api_names and not matching_nodes:
+            discrepancies.append(
+                f"OpenData version '{opendata_version}' not found in API catalogue active nodes"
+            )
 
     return {
         "dataset_number": dataset_number,
