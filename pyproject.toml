@@ -26,6 +26,10 @@ packages = ["src/fgis_mcp"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-m 'not live'"
+markers = [
+    "live: tests requiring real FGIS network access and/or prepared live dataset",
+]
 
 [tool.ruff]
 line-length = 110

@@ -15,6 +15,7 @@ import os
 import sys
 from decimal import Decimal
 
+import pytest
 from mcp import Client
 from mcp.client.stdio import StdioServerParameters
 
@@ -30,6 +31,7 @@ def get_client_params():
     )
 
 
+@pytest.mark.live
 def test_scenario_a_server_rack_42u():
     """Scenario A: Search for 42U server cabinet.
     Must return not_found or candidate, never an exact match for 42U.
@@ -48,6 +50,7 @@ def test_scenario_a_server_rack_42u():
     asyncio.run(run())
 
 
+@pytest.mark.live
 def test_scenario_b_switch_cabinet_reality():
     """Scenario B: Norm 10-04-067-04 applied to Ethernet switch.
     Must show exact name, unit, collection (TV studio equipment), resources, proving it is not for Ethernet switches.
@@ -72,6 +75,7 @@ def test_scenario_b_switch_cabinet_reality():
     asyncio.run(run())
 
 
+@pytest.mark.live
 def test_scenario_c_coefficient_1_15_applicability():
     """Scenario C: Checking coefficient 1.15 applicability to 10-04-067-04.
     Must read official document text/tables through MCP and verify no 1.15 exists for 10-04-067 in Collection 10.
@@ -104,6 +108,7 @@ def test_scenario_c_coefficient_1_15_applicability():
     asyncio.run(run())
 
 
+@pytest.mark.live
 def test_scenario_d_utp_cable_in_tray():
     """Scenario D: Suitable norm for laying UTP cable in tray.
     Strictly search -> read_norm for EACH returned candidate.
@@ -144,6 +149,7 @@ def test_scenario_d_utp_cable_in_tray():
     asyncio.run(run())
 
 
+@pytest.mark.live
 def test_scenario_e_norm_history_changes():
     """Scenario E: History of 01-01-001-01.
     Must rely purely on MCP history/editions.
@@ -205,6 +211,7 @@ def test_vor_section_5_arithmetic_control():
     assert base_mark == Decimal("24.35")
 
 
+@pytest.mark.live
 def test_vor_section_5_mcp_workflow():
     """VOR Section 5 evidence-first MCP workflow contract:
     1. fgis_search_norms returns real results;
