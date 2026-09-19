@@ -543,11 +543,36 @@ class Service:
     ):
         if not dataset_id:
             datasets = self.datasets().get("items", [])
-            if not datasets:
+            # Priority 1: dataset with prices matching zone_id (if zone_id given)
+            if zone_id is not None:
+                for d in datasets:
+                    data = Dataset(self.config.root, d["dataset_id"])
+                    res_p = data.query(kind="prices", code=code, zone_id=zone_id, limit=1)
+                    if res_p.get("items"):
+                        dataset_id = d["dataset_id"]
+                        break
+            # Priority 2: dataset with fsbc records for this code
+            if not dataset_id:
+                for d in datasets:
+                    data = Dataset(self.config.root, d["dataset_id"])
+                    res_f = data.query(kind="fsbc", code=code, limit=1)
+                    if res_f.get("items"):
+                        dataset_id = d["dataset_id"]
+                        break
+            # Priority 3: dataset with any prices for this code
+            if not dataset_id:
+                for d in datasets:
+                    data = Dataset(self.config.root, d["dataset_id"])
+                    res_p = data.query(kind="prices", code=code, limit=1)
+                    if res_p.get("items"):
+                        dataset_id = d["dataset_id"]
+                        break
+            if not dataset_id and datasets:
+                dataset_id = datasets[0]["dataset_id"]
+            elif not dataset_id:
                 raise LocalDatasetIncompleteError(
                     "No local datasets available. Build or specify a dataset_id to query price history."
                 )
-            dataset_id = datasets[0]["dataset_id"]
 
         data = Dataset(self.config.root, dataset_id)
         return data.price_history(code, zone_id, include_incomplete=include_incomplete)

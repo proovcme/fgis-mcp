@@ -154,3 +154,42 @@ def test_10_server_descriptions_no_unsupported_capabilities(config):
 
     for claim in forbidden_claims:
         assert claim not in all_text, f"Forbidden exaggerated capability claim found: {claim}"
+
+
+def test_11_download_and_price_history_contract_descriptions(config):
+    server = create_server(config)
+    tools = {t.name: t for t in asyncio.run(server.list_tools())}
+
+    # fgis_start_download contract
+    download_tool = tools["fgis_start_download"]
+    download_schema = download_tool.input_schema.get("properties", {})
+    assert "price_books" in download_schema
+    assert "price_zone_ids" not in download_schema
+    assert "period_ids" not in download_schema
+    download_desc = download_tool.description
+    assert "price_books" in download_desc
+    assert "price_zone_ids" in download_desc  # explicitly warns they don't exist
+    assert "period_ids" in download_desc  # explicitly warns they don't exist
+
+    # fgis_price_history contract
+    price_tool = tools["fgis_price_history"]
+    price_desc = price_tool.description
+    assert "base_records" in price_desc
+    assert "quarterly_records" in price_desc
+
+    # fgis_query_dataset contract
+    query_tool = tools["fgis_query_dataset"]
+    query_desc = query_tool.description
+    assert "fsbc" in query_desc
+    assert "fgis_price_history" in query_desc
+
+
+def test_12_documentation_no_invalid_download_parameters():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    md_files = list(root.glob("*.md")) + list((root / "docs").glob("*.md"))
+    for md_file in md_files:
+        content = md_file.read_text(encoding="utf-8")
+        assert "price_zone_ids" not in content, f"Invalid price_zone_ids found in {md_file}"
+        assert "period_ids" not in content, f"Invalid period_ids found in {md_file}"

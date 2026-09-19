@@ -166,8 +166,17 @@ def create_server(config):
         opendata_version: str | None = None,
         max_tasks: int = 25000,
     ) -> dict:
-        """Start durable download. Explicit queries, collection prefixes (each scans 01..99),
-        price_books [{zone_id,period_id}]. No automatic all-Russia/history download.
+        """Start durable background download into a local dataset.
+        Explicit queries, collection prefixes (each scans 01..99),
+        and price_books list of zone/period pairs.
+        IMPORTANT: there are NO 'price_zone_ids' or 'period_ids' arguments!
+        Zone and period pairs must be passed strictly via 'price_books', for example:
+            fgis_start_download(
+                price_books=[
+                    {"zone_id": 206, "period_id": 426},
+                    {"zone_id": 206, "period_id": 427}
+                ]
+            )
         sources from fgis_sources traverses actual catalogues and downloads documents with technical parts.
         ['all_public'] selects all adapters; include_archive adds archived legal trees; all_periods includes
         historical split forms (large); opendata_version downloads only the specified FSNB snapshot/GUID/filename.
@@ -230,7 +239,13 @@ def create_server(config):
         zone_id: int | None = None,
         period_id: int | None = None,
     ) -> dict:
-        """Offline norms/prices/documents search. Documents return summaries; read full content with document tool."""
+        """Offline norms/prices/documents/fsbc search in a local dataset.
+        kind can be 'norms', 'prices', 'documents', or 'fsbc'.
+        kind='fsbc' searches local FSBC resource cards by code or text.
+        For tracking the history of a resource card across snapshot editions, prefer fgis_price_history,
+        which aggregates base_records across all imported snapshots.
+        Documents return summaries; read full content with document tool.
+        """
         return Dataset(config.root, dataset_id).query(kind, query, code, limit, offset, zone_id, period_id)
 
     @server.tool(annotations=write)
@@ -270,7 +285,18 @@ def create_server(config):
         zone_id: int | None = None,
         include_incomplete: bool = False,
     ) -> dict:
-        """Query resource price timeline across all available periods in a dataset."""
+        """Query resource price timeline and FSBC base card evolution across editions and periods in a dataset.
+        Returns two distinct sets of records that must NOT be mixed:
+        1. base_records: history of the base FSBC resource card across imported editions/snapshots.
+           Shows official resource name, unit of measurement, base prices (price_base, price_release),
+           resource_type, snapshot_id/snapshot_uid, and provenance. Use base_records to track resource
+           name and unit changes between FSNB/FSBC editions.
+        2. quarterly_records: quarterly estimated and current prices from regional split forms for zone_id
+           and period_id.
+        available_periods lists all quarterly periods present in the dataset.
+        Absence of quarterly price records in the local dataset does NOT prove absence in FGIS CS;
+        unimported periods/zones can be downloaded via fgis_start_download.
+        """
         return service.price_history(code, dataset_id, zone_id, include_incomplete=include_incomplete)
 
     @server.tool(annotations=local)
