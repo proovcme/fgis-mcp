@@ -70,12 +70,18 @@ def create_server(config):
         return service.catalog(kind, parent_id)
 
     @server.tool(annotations=read)
-    def fgis_search_norms(query: str, limit: int = 20, offset: int = 0) -> dict:
+    def fgis_search_norms(
+        query: str,
+        limit: int = 20,
+        offset: int = 0,
+        family: str | None = None,
+    ) -> dict:
         """Search public norm API by code/text. Returns cards for all returned source publications.
         Use this tool before claiming that a norm exists or before proposing a norm for a work item.
         Do not invent or infer norm codes absent from this result. Distinguishes exact, candidate, and not_found matches.
+        Pass family (e.g. 'ГЭСН' or 'ГЭСНм') to filter results by norm collection family.
         """
-        return service.online(query, limit, offset)
+        return service.online(query, limit, offset, family=family)
 
     @server.tool(annotations=read)
     def fgis_read_norm(
@@ -87,8 +93,9 @@ def create_server(config):
     ) -> dict:
         """Read exact bare norm card online: code, name, unit, hierarchy (collection/dept/section/table),
         work steps, resources, mass, special indicators, separate editions and structured provenance.
-        Use family (for example, 'ГЭСН' or 'ГЭСНм') and/or document_guid from
-        fgis_browse_source when the same numeric code exists in different collections.
+        When the same numeric code exists in different collections/families (e.g. ГЭСН vs ГЭСНм),
+        returns match_status='ambiguous' with options. Disambiguate by providing family (e.g. 'ГЭСН', 'ГЭСНм')
+        and/or document_guid.
         Returns a compact self-contained card without duplicated data.
         Use this tool before claiming what a norm includes, its unit, work steps, resources or technical characteristics.
         Do NOT call fgis_read_document merely to inspect norm resources or work steps — use fgis_read_norm instead.
@@ -250,15 +257,19 @@ def create_server(config):
         offset: int = 0,
         zone_id: int | None = None,
         period_id: int | None = None,
+        family: str | None = None,
     ) -> dict:
         """Offline norms/prices/documents/fsbc search in a local dataset.
         kind can be 'norms', 'prices', 'documents', or 'fsbc'.
         kind='fsbc' searches local FSBC resource cards by code or text.
+        For kind='norms', family filters by collection family (e.g. 'ГЭСН', 'ГЭСНм').
         For tracking the history of a resource card across snapshot editions, prefer fgis_price_history,
         which aggregates base_records across all imported snapshots.
         Documents return summaries; read full content with document tool.
         """
-        return Dataset(config.root, dataset_id).query(kind, query, code, limit, offset, zone_id, period_id)
+        return Dataset(config.root, dataset_id).query(
+            kind, query, code, limit, offset, zone_id, period_id, family=family
+        )
 
     @server.tool(annotations=write)
     def fgis_export_dataset(dataset_id: str, formats: list[str] | None = None) -> dict:
@@ -271,11 +282,21 @@ def create_server(config):
         edition_a: str | None = None,
         edition_b: str | None = None,
         dataset_id: str | None = None,
+        family: str | None = None,
+        document_guid: str | None = None,
     ) -> dict:
         """Compare two editions or publications of a norm code: differences in work steps, resources, units.
         Use to verify additions, removals, changes, or invariances between norm versions.
+        Specify family (e.g. 'ГЭСН' or 'ГЭСНм') or document_guid when the code exists in multiple families.
         """
-        return service.compare_norms(code, edition_a, edition_b, dataset_id)
+        return service.compare_norms(
+            code,
+            edition_a,
+            edition_b,
+            dataset_id,
+            family=family,
+            document_guid=document_guid,
+        )
 
     @server.tool(annotations=read)
     def fgis_extract_coefficients(

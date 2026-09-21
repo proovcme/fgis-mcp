@@ -1,4 +1,5 @@
 import json
+import re
 
 from filelock import FileLock, Timeout
 
@@ -8,6 +9,23 @@ from .errors import LocalDatasetIncompleteError, NotFoundError
 from .network import Network
 from .normalize import norm_cards
 from .storage import Dataset, now
+
+
+def norm_entity_key(card: dict) -> tuple:
+    """Identity key of the normative entity (not specific edition/publication).
+    Entity identity is defined by (family, collection_number, code).
+    """
+    code = (card.get("code") or "").strip().casefold()
+    family = (card.get("family") or "").strip().casefold()
+    hierarchy = card.get("hierarchy") or {}
+    collection = (
+        hierarchy.get("collection")
+        or (card.get("source") or {}).get("document")
+        or ""
+    )
+    m = re.search(r"сборник\s*(\d+)", collection, re.IGNORECASE)
+    coll_num = m.group(1) if m else None
+    return (family, coll_num, code)
 
 
 def page(items, limit, offset):
@@ -89,6 +107,8 @@ class Service:
                 "editions_differences": None,
                 "editions_note": None,
                 "editions": [],
+                "primary": None,
+                "options": None,
                 "match_status": "not_found",
                 "message": (
                     "Прямая норма ФСНБ с заданными фильтрами через FGIS MCP не подтверждена"
@@ -97,7 +117,74 @@ class Service:
                 ),
             }
 
-        primary = cards[0]
+        # Group cards by entity identity (family, collection, code)
+        entities: dict[tuple, list[dict]] = {}
+        for c in cards:
+            entities.setdefault(norm_entity_key(c), []).append(c)
+
+        if len(entities) > 1:
+            options = []
+            for _, ent_cards in entities.items():
+                first_c = ent_cards[0]
+                coll_name = (
+                    first_c.get("hierarchy", {}).get("collection")
+                    or (first_c.get("source") or {}).get("document")
+                    or ""
+                )
+                options.append(
+                    {
+                        "code": first_c.get("code", q_clean),
+                        "family": first_c.get("family"),
+                        "name": first_c.get("name"),
+                        "unit": first_c.get("unit"),
+                        "document_guid": first_c.get("document_guid"),
+                        "collection": coll_name,
+                        "hierarchy": first_c.get("hierarchy"),
+                        "total_editions": len(ent_cards),
+                        "provenance": first_c.get("provenance"),
+                    }
+                )
+
+            families_str = ", ".join(sorted({o["family"] for o in options if o.get("family")}))
+            return {
+                "code": q_clean,
+                "name": None,
+                "unit": None,
+                "family": None,
+                "hierarchy": {
+                    "collection": None,
+                    "department": None,
+                    "section": None,
+                    "subsection": None,
+                    "table": None,
+                    "full_path": [],
+                },
+                "work_steps": [],
+                "resources": [],
+                "massa": None,
+                "special_indicators": [],
+                "document_guid": None,
+                "record_id": None,
+                "edition": None,
+                "provenance": None,
+                "has_multiple_editions": False,
+                "total_editions": 0,
+                "editions_identical": True,
+                "editions_differences": None,
+                "editions_note": None,
+                "editions": [],
+                "primary": None,
+                "options": options,
+                "match_status": "ambiguous",
+                "message": (
+                    f"Обнаружено {len(options)} различных нормативных сущностей с данным шифром"
+                    + (f" в семействах ({families_str})" if families_str else "")
+                    + ". Уточните запрос с помощью 'family' и/или 'document_guid'."
+                ),
+            }
+
+        entity_cards = list(entities.values())[0]
+        primary = entity_cards[0]
 
         def _compact_res(r):
             return {
@@ -118,12 +205,12 @@ class Service:
                 "total_resources": len(c.get("resources", [])),
                 "provenance": c.get("provenance"),
             }
-            for idx, c in enumerate(cards, 1)
+            for idx, c in enumerate(entity_cards, 1)
         ]
 
         from .compare import compare_norms
 
-        total_editions = len(cards)
+        total_editions = len(entity_cards)
         has_multiple_editions = total_editions > 1
         editions_differences = None
         editions_identical = True
@@ -131,7 +218,7 @@ class Service:
         if total_editions > 1:
             diffs = []
             for i in range(1, total_editions):
-                diff = compare_norms(cards[0], cards[i])
+                diff = compare_norms(entity_cards[0], entity_cards[i])
                 if diff.get("has_differences"):
                     editions_identical = False
                     d_res = diff.get("details", {}).get("resources", {})
@@ -140,10 +227,10 @@ class Service:
                         {
                             "edition_a_index": 1,
                             "edition_b_index": i + 1,
-                            "edition_a_record_id": cards[0].get("source", {}).get("record_id"),
-                            "edition_b_record_id": cards[i].get("source", {}).get("record_id"),
-                            "edition_a_guid": cards[0].get("document_guid"),
-                            "edition_b_guid": cards[i].get("document_guid"),
+                            "edition_a_record_id": entity_cards[0].get("source", {}).get("record_id"),
+                            "edition_b_record_id": entity_cards[i].get("source", {}).get("record_id"),
+                            "edition_a_guid": entity_cards[0].get("document_guid"),
+                            "edition_b_guid": entity_cards[i].get("document_guid"),
                             "summary": diff.get("summary", []),
                             "details": {
                                 "work_steps_added": d_works.get("added", []),
@@ -202,21 +289,25 @@ class Service:
             "editions_differences": editions_differences,
             "editions_note": editions_note,
             "editions": compact_editions,
+            "options": None,
             "match_status": "exact",
             "message": "Найдено точное совпадение нормы",
         }
 
-    def online(self, query, limit=20, offset=0, *, full=False):
+    def online(self, query, limit=20, offset=0, *, full=False, family=None):
         if not isinstance(query, str) or not 1 <= len(query.strip()) <= 200:
             raise ValueError("query must contain 1..200 characters")
         if full:
-            card = self.read_norm(query)
+            card = self.read_norm(query, family=family)
             q_clean = query.strip()
             records, _, meta = self.network.get_json(
                 "FullTextSearch/SearchEstimatedRates", {"search": q_clean}
             )
             cards = norm_cards(records)
             cards = [c for c in cards if c["code"].casefold() == q_clean.casefold()]
+            if family:
+                family_clean = family.strip().casefold()
+                cards = [c for c in cards if (c.get("family") or "").strip().casefold() == family_clean]
             paged = page(cards, limit, offset)
             return {
                 **card,
@@ -235,6 +326,9 @@ class Service:
         records, _, meta = self.network.get_json("FullTextSearch/SearchEstimatedRates", {"search": query})
         cards = norm_cards(records)
         q_clean = query.strip()
+        if family:
+            family_clean = family.strip().casefold()
+            cards = [c for c in cards if (c.get("family") or "").strip().casefold() == family_clean]
 
         for card in cards:
             c_code = card.get("code", "")
@@ -246,16 +340,23 @@ class Service:
 
         cards = [{k: v for k, v in card.items() if k not in {"resources", "work_steps"}} for card in cards]
 
+        exact_code_matches = [c for c in cards if c.get("code", "").casefold() == q_clean.casefold()]
+        exact_entities = {norm_entity_key(c) for c in exact_code_matches}
+
         if not cards:
             overall_status = "not_found"
             msg = "Прямая норма ФСНБ через FGIS MCP не подтверждена"
+        elif len(exact_entities) > 1:
+            overall_status = "ambiguous"
+            fams = sorted({c.get("family") for c in exact_code_matches if c.get("family")})
+            fams_str = f" ({', '.join(fams)})" if fams else ""
+            msg = f"Обнаружено несколько различных нормативных сущностей{fams_str} по точному шифру. Требуется уточнить family."
+        elif len(exact_entities) == 1:
+            overall_status = "exact"
+            msg = "Найдено точное совпадение нормы"
         elif any(c.get("match_status") == "exact" for c in cards):
-            overall_status = (
-                "exact"
-                if any(c.get("code", "").casefold() == q_clean.casefold() for c in cards)
-                else "candidate"
-            )
-            msg = "Найдено точное совпадение нормы" if overall_status == "exact" else "Найдены кандидаты норм"
+            overall_status = "candidate"
+            msg = "Найдены кандидаты норм"
         else:
             overall_status = "candidate"
             msg = "Найдены кандидаты норм (требуется проверка применимости и чтение состава работ/ресурсов)"
@@ -336,30 +437,65 @@ class Service:
         edition_a: str | None = None,
         edition_b: str | None = None,
         dataset_id: str | None = None,
+        family: str | None = None,
+        document_guid: str | None = None,
     ):
         from .compare import compare_norms
 
         records = []
         if dataset_id:
             data = Dataset(self.config.root, dataset_id)
-            res = data.query(kind="norms", code=code)
+            res = data.query(kind="norms", code=code, family=family)
             records = res.get("items", [])
         else:
             datasets = self.datasets().get("items", [])
             for d in datasets:
                 data = Dataset(self.config.root, d["dataset_id"])
-                res = data.query(kind="norms", code=code)
+                res = data.query(kind="norms", code=code, family=family)
                 if res.get("items"):
                     records = res.get("items", [])
                     break
 
         if not records:
             # Fallback to online search if dataset has no records
-            online_res = self.online(code, full=True)
+            online_res = self.online(code, full=True, family=family)
             records = online_res.get("items", [])
+
+        if family:
+            family_clean = family.strip().casefold()
+            records = [r for r in records if (r.get("family") or "").strip().casefold() == family_clean]
+        if document_guid:
+            guid_clean = document_guid.strip().casefold()
+            records = [
+                r
+                for r in records
+                if (
+                    r.get("document_guid")
+                    or (r.get("source") or {}).get("document_guid")
+                )
+                and (
+                    (r.get("document_guid") or "").strip().casefold() == guid_clean
+                    or ((r.get("source") or {}).get("document_guid") or "").strip().casefold() == guid_clean
+                )
+            ]
 
         if not records:
             raise NotFoundError(f"Norm {code} not found in dataset or online")
+
+        # Group records by entity identity to prevent cross-family/cross-entity comparison
+        entities: dict[tuple, list[dict]] = {}
+        for r in records:
+            entities.setdefault(norm_entity_key(r), []).append(r)
+
+        if len(entities) > 1:
+            families = sorted({(r.get("family") or "").strip() for r in records if (r.get("family") or "").strip()})
+            families_str = f" ({', '.join(families)})" if families else ""
+            raise ValueError(
+                f"Norm code '{code}' is ambiguous across {len(entities)} distinct entities{families_str}. "
+                "Specify 'family' and/or 'document_guid' to compare editions of a specific norm."
+            )
+
+        records = list(entities.values())[0]
 
         if len(records) == 1:
             return {
@@ -375,7 +511,7 @@ class Service:
         if edition_a or edition_b:
             for r in records:
                 doc = (r.get("source") or {}).get("document", "")
-                guid_val = (r.get("source") or {}).get("document_guid", "")
+                guid_val = (r.get("source") or {}).get("document_guid", "") or r.get("document_guid", "")
                 snap_val = str(r.get("snapshot_id") or "")
                 s_uid_val = str(r.get("snapshot_uid") or "")
                 decree_val = str(r.get("decree") or "")
@@ -386,7 +522,7 @@ class Service:
                     or edition_a in doc
                     or edition_a == guid_val
                     or edition_a in snap_val
-                    or edition_a in decree_val
+                    or edition_a == decree_val
                     or edition_a in norm_id_val
                 )
                 matches_b = edition_b and (
@@ -394,7 +530,7 @@ class Service:
                     or edition_b in doc
                     or edition_b == guid_val
                     or edition_b in snap_val
-                    or edition_b in decree_val
+                    or edition_b == decree_val
                     or edition_b in norm_id_val
                 )
                 if matches_a and card_a is None:
@@ -417,7 +553,7 @@ class Service:
             datasets = self.datasets().get("items", [])
             for d in datasets:
                 data = Dataset(self.config.root, d["dataset_id"])
-                res = data.query(kind="norms", code=code)
+                res = data.query(kind="norms", code=code, family=family)
                 if res.get("items"):
                     dataset_id = d["dataset_id"]
                     break
