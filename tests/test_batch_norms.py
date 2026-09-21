@@ -174,8 +174,9 @@ def test_batch_search_invalid_item_isolated(config, monkeypatch, mock_network_re
     assert results[1]["match_status"] == "candidate"
     assert results[1]["total"] == 1
 
-    assert results[2]["input_id"] == "item_3"
+    assert results[2]["input_id"] is None
     assert results[2]["match_status"] == "error"
+    assert results[2]["error_code"] == "INVALID_INPUT"
 
 
 def test_batch_search_limit_validation(config):
@@ -227,7 +228,10 @@ def test_batch_read_mixed_statuses_exact_ambiguous_not_found(config, monkeypatch
     assert exact_item["resources_count"] == 1
     assert len(exact_item["resources"]) == 1
     assert exact_item["resources"][0]["code"] == "301-0001"
-    assert "work_steps" not in exact_item  # compact mode omits work steps
+    assert exact_item["work_steps"] == ["Установка шкафа"]  # compact mode preserves work steps
+    assert "full_path" not in exact_item["hierarchy"]  # compact hierarchy omits full_path
+    assert exact_item["hierarchy"]["collection"] == "Сборник 10. Оборудование связи"
+    assert "editions_differences" not in exact_item
 
     # 2. Ambiguous item
     ambig_item = r_map["item_ambiguous"]
@@ -258,6 +262,7 @@ def test_batch_read_fault_isolation(config, monkeypatch, mock_network_records):
     results = res["results"]
     assert results[0]["input_id"] == "bad_code"
     assert results[0]["match_status"] == "error"
+    assert results[0]["error_code"] == "INVALID_INPUT"
     assert "code must be a string" in results[0]["error"]
 
     assert results[1]["input_id"] == "good_code"
@@ -265,25 +270,77 @@ def test_batch_read_fault_isolation(config, monkeypatch, mock_network_records):
 
     assert results[2]["input_id"] == "bad_family"
     assert results[2]["match_status"] == "error"
+    assert results[2]["error_code"] == "INVALID_INPUT"
     assert "family must be a non-empty string" in results[2]["error"]
 
 
-def test_batch_read_duplicate_inputs(config, monkeypatch, mock_network_records):
-    """Duplicate input_ids and codes are handled independently preserving position."""
+def test_batch_read_unique_input_id_and_duplicate_rejection(config, monkeypatch, mock_network_records):
+    """Duplicate input_id within a batch must be flagged as error; distinct input_ids with identical codes succeed."""
+    svc = Service(config)
+    monkeypatch.setattr(svc.network, "get_json", _make_mock_get_json(mock_network_records))
+
+    # 1. Duplicate input_id: first is processed, second is marked DUPLICATE_INPUT_ID error
+    items_dup = [
+        {"input_id": "dup_pos", "code": "10-04-067-04"},
+        {"input_id": "dup_pos", "code": "10-04-067-04"},
+        {"input_id": "unique_pos", "code": "10-04-067-04"},
+    ]
+    res_dup = svc.batch_read_norms(items_dup)
+
+    assert res_dup["total_items"] == 3
+    assert res_dup["results"][0]["input_id"] == "dup_pos"
+    assert res_dup["results"][0]["match_status"] == "exact"
+
+    assert res_dup["results"][1]["input_id"] == "dup_pos"
+    assert res_dup["results"][1]["match_status"] == "error"
+    assert res_dup["results"][1]["error_code"] == "DUPLICATE_INPUT_ID"
+    assert "must be unique" in res_dup["results"][1]["error"]
+
+    assert res_dup["results"][2]["input_id"] == "unique_pos"
+    assert res_dup["results"][2]["match_status"] == "exact"
+
+    # 2. Missing or empty input_id must not be silently replaced by synthetic id
+    items_missing_id = [
+        {"code": "10-04-067-04"},
+        {"input_id": "", "code": "10-04-067-04"},
+        {"input_id": "   ", "code": "10-04-067-04"},
+    ]
+    res_missing = svc.batch_read_norms(items_missing_id)
+    for r in res_missing["results"]:
+        assert r["match_status"] == "error"
+        assert r["error_code"] == "INVALID_INPUT"
+        assert "missing required non-empty string 'input_id'" in r["error"]
+
+
+def test_batch_search_duplicate_input_id(config, monkeypatch, mock_network_records):
     svc = Service(config)
     monkeypatch.setattr(svc.network, "get_json", _make_mock_get_json(mock_network_records))
 
     items = [
-        {"input_id": "dup", "code": "10-04-067-04"},
-        {"input_id": "dup", "code": "10-04-067-04"},
+        {"input_id": "search_1", "query": "шкаф"},
+        {"input_id": "search_1", "query": "ванна"},
     ]
-    res = svc.batch_read_norms(items)
+    res = svc.batch_search_norms(items)
+    assert res["results"][0]["match_status"] == "candidate"
+    assert res["results"][1]["match_status"] == "error"
+    assert res["results"][1]["error_code"] == "DUPLICATE_INPUT_ID"
 
-    assert res["total_items"] == 2
-    assert res["results"][0]["input_id"] == "dup"
-    assert res["results"][1]["input_id"] == "dup"
-    assert res["results"][0]["match_status"] == "exact"
-    assert res["results"][1]["match_status"] == "exact"
+
+def test_batch_unexpected_internal_error_is_masked(config, monkeypatch):
+    """Unexpected internal exceptions must return safe INTERNAL_ERROR without raw exception text."""
+    svc = Service(config)
+
+    def _broken_get_json(*args, **kwargs):
+        raise RuntimeError("/secret/path/corrupt_internal_db.c:42: Memory corrupted")
+
+    monkeypatch.setattr(svc.network, "get_json", _broken_get_json)
+
+    res = svc.batch_read_norms([{"input_id": "item_1", "code": "10-04-067-04"}])
+    r = res["results"][0]
+    assert r["match_status"] == "error"
+    assert r["error_code"] == "INTERNAL_ERROR"
+    assert r["error"] == "Внутренняя ошибка обработки позиции"
+    assert "/secret/path" not in r["error"]
 
 
 def test_batch_read_detail_levels(config, monkeypatch, mock_network_records):
@@ -292,18 +349,22 @@ def test_batch_read_detail_levels(config, monkeypatch, mock_network_records):
 
     items = [{"input_id": "item_1", "code": "10-04-067-04"}]
 
-    # 1. Compact detail level
+    # 1. Compact detail level: includes work_steps, compact resources, omits full_path and editions diffs
     res_compact = svc.batch_read_norms(items, detail_level="compact")
     r_c = res_compact["results"][0]
     assert "resources_count" in r_c
-    assert "work_steps" not in r_c
+    assert "work_steps" in r_c
+    assert r_c["work_steps"] == ["Установка шкафа"]
+    assert "full_path" not in r_c["hierarchy"]
+    assert "editions_differences" not in r_c
 
-    # 2. Full detail level
+    # 2. Full detail level: includes full hierarchy and editions
     res_full = svc.batch_read_norms(items, detail_level="full")
     r_f = res_full["results"][0]
     assert "work_steps" in r_f
-    assert len(r_f["work_steps"]) == 1
-    assert r_f["work_steps"][0] == "Установка шкафа"
+    assert r_f["work_steps"] == ["Установка шкафа"]
+    assert "full_path" in r_f["hierarchy"]
+    assert "editions" in r_f
 
 
 def test_batch_read_limit_validation(config):

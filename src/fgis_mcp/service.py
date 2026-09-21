@@ -6,7 +6,7 @@ from filelock import FileLock, Timeout
 
 from . import jobs
 from .documents import OnlineDocuments
-from .errors import LocalDatasetIncompleteError, NotFoundError
+from .errors import FgisError, LocalDatasetIncompleteError, NotFoundError
 from .network import Network
 from .normalize import norm_cards
 from .storage import Dataset, now
@@ -33,6 +33,28 @@ def page(items, limit, offset):
         "offset": offset,
         "items": items[offset : offset + limit],
         "next_offset": offset + limit if offset + limit < len(items) else None,
+    }
+
+
+def format_batch_error(exc: Exception) -> dict:
+    if isinstance(exc, FgisError):
+        return {
+            "error_code": exc.code,
+            "error": exc.message,
+        }
+    if isinstance(exc, ValueError):
+        return {
+            "error_code": "INVALID_INPUT",
+            "error": str(exc),
+        }
+    if isinstance(exc, TimeoutError):
+        return {
+            "error_code": "TIMEOUT",
+            "error": "Превышено время ожидания ответа от ФГИС ЦС",
+        }
+    return {
+        "error_code": "INTERNAL_ERROR",
+        "error": "Внутренняя ошибка обработки позиции",
     }
 
 
@@ -379,29 +401,88 @@ class Service:
         if not isinstance(items, list) or not (1 <= len(items) <= 10):
             raise ValueError("items must be a list containing 1..10 elements")
 
-        def _search_single(idx: int, item: dict) -> dict:
+        seen_ids = set()
+        tasks = []
+        for idx, item in enumerate(items, 1):
             if not isinstance(item, dict):
-                return {
-                    "input_id": f"item_{idx}",
-                    "query": None,
-                    "total": 0,
-                    "candidates": [],
-                    "match_status": "error",
-                    "error": "Item must be a dictionary with 'input_id' and 'query'",
-                }
+                tasks.append(
+                    {
+                        "idx": idx,
+                        "error_res": {
+                            "input_id": None,
+                            "query": None,
+                            "total": 0,
+                            "candidates": [],
+                            "match_status": "error",
+                            "error_code": "INVALID_INPUT",
+                            "error": "Item must be a dictionary with 'input_id' and 'query'",
+                        },
+                    }
+                )
+                continue
 
-            input_id = item.get("input_id")
-            if not input_id or not isinstance(input_id, str):
-                input_id = f"item_{idx}"
+            raw_id = item.get("input_id")
+            if not isinstance(raw_id, str) or not raw_id.strip():
+                tasks.append(
+                    {
+                        "idx": idx,
+                        "error_res": {
+                            "input_id": raw_id if isinstance(raw_id, str) else None,
+                            "query": item.get("query") if isinstance(item.get("query"), str) else None,
+                            "total": 0,
+                            "candidates": [],
+                            "match_status": "error",
+                            "error_code": "INVALID_INPUT",
+                            "error": "Item is missing required non-empty string 'input_id'",
+                        },
+                    }
+                )
+                continue
+
+            input_id = raw_id.strip()
+            if input_id in seen_ids:
+                tasks.append(
+                    {
+                        "idx": idx,
+                        "error_res": {
+                            "input_id": input_id,
+                            "query": item.get("query") if isinstance(item.get("query"), str) else None,
+                            "total": 0,
+                            "candidates": [],
+                            "match_status": "error",
+                            "error_code": "DUPLICATE_INPUT_ID",
+                            "error": f"Duplicate input_id '{input_id}': input_id must be unique within a batch",
+                        },
+                    }
+                )
+                continue
+
+            seen_ids.add(input_id)
+            tasks.append(
+                {
+                    "idx": idx,
+                    "item": item,
+                    "input_id": input_id,
+                }
+            )
+
+        def _search_worker(t: dict) -> tuple[int, dict]:
+            if "error_res" in t:
+                return t["idx"], t["error_res"]
+
+            idx = t["idx"]
+            item = t["item"]
+            input_id = t["input_id"]
 
             raw_query = item.get("query")
             if not isinstance(raw_query, str) or not 1 <= len(raw_query.strip()) <= 200:
-                return {
+                return idx, {
                     "input_id": input_id,
                     "query": raw_query if isinstance(raw_query, str) else None,
                     "total": 0,
                     "candidates": [],
                     "match_status": "error",
+                    "error_code": "INVALID_INPUT",
                     "error": "query must be a string containing 1..200 characters",
                 }
 
@@ -409,12 +490,13 @@ class Service:
             family = item.get("family")
             if family is not None:
                 if not isinstance(family, str) or not family.strip():
-                    return {
+                    return idx, {
                         "input_id": input_id,
                         "query": q_clean,
                         "total": 0,
                         "candidates": [],
                         "match_status": "error",
+                        "error_code": "INVALID_INPUT",
                         "error": "family must be a non-empty string when provided",
                     }
                 family = family.strip()
@@ -457,48 +539,64 @@ class Service:
                                 "source": "online_api",
                                 "document_guid": c.get("document_guid"),
                                 "record_id": c_src.get("record_id") or c_ev.get("record_id"),
-                                "sha256": c_ev.get("sha256") or c_src.get("record_sha256"),
+                                "record_sha256": c_src.get("record_sha256") or c_ev.get("sha256"),
                             },
                         }
                     )
 
+                provenance = {
+                    "source": "online_api",
+                    "source_url": meta.get("source_url"),
+                    "sha256": meta.get("sha256"),
+                    "bytes": meta.get("bytes"),
+                    "fetched_at": now(),
+                }
+
                 if not candidates:
-                    return {
+                    return idx, {
                         "input_id": input_id,
                         "query": q_clean,
                         "total": 0,
                         "candidates": [],
                         "match_status": "not_found",
                         "message": "Прямая норма ФСНБ через FGIS MCP не подтверждена",
+                        "provenance": provenance,
                     }
 
-                return {
+                return idx, {
                     "input_id": input_id,
                     "query": q_clean,
                     "total": len(candidates),
                     "candidates": candidates,
                     "match_status": "candidate",
                     "message": "Найдены кандидаты норм",
+                    "provenance": provenance,
                 }
             except Exception as exc:
-                return {
+                err_dict = format_batch_error(exc)
+                return idx, {
                     "input_id": input_id,
                     "query": q_clean,
                     "total": 0,
                     "candidates": [],
                     "match_status": "error",
-                    "error": str(exc),
+                    **err_dict,
                 }
 
-        max_workers = min(4, len(items))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            indexed_items = list(enumerate(items, 1))
-            futures = [executor.submit(_search_single, idx, it) for idx, it in indexed_items]
-            results = [f.result() for f in futures]
+        executable_tasks = [t for t in tasks if "error_res" not in t]
+        static_results = [(t["idx"], t["error_res"]) for t in tasks if "error_res" in t]
 
+        if executable_tasks:
+            max_workers = min(4, len(executable_tasks))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                async_results = list(executor.map(_search_worker, executable_tasks))
+        else:
+            async_results = []
+
+        all_results = sorted(static_results + async_results, key=lambda x: x[0])
         return {
             "total_items": len(items),
-            "results": results,
+            "results": [r[1] for r in all_results],
         }
 
     def batch_read_norms(self, items: list[dict], detail_level: str = "compact") -> dict:
@@ -508,35 +606,91 @@ class Service:
         if detail_level not in {"compact", "full"}:
             raise ValueError("detail_level must be 'compact' or 'full'")
 
-        def _read_single(idx: int, item: dict) -> dict:
+        seen_ids = set()
+        tasks = []
+        for idx, item in enumerate(items, 1):
             if not isinstance(item, dict):
-                return {
-                    "input_id": f"item_{idx}",
-                    "code": None,
-                    "match_status": "error",
-                    "error": "Item must be a dictionary with 'input_id' and 'code'",
-                }
+                tasks.append(
+                    {
+                        "idx": idx,
+                        "error_res": {
+                            "input_id": None,
+                            "code": None,
+                            "match_status": "error",
+                            "error_code": "INVALID_INPUT",
+                            "error": "Item must be a dictionary with 'input_id' and 'code'",
+                        },
+                    }
+                )
+                continue
 
-            input_id = item.get("input_id")
-            if not input_id or not isinstance(input_id, str):
-                input_id = f"item_{idx}"
+            raw_id = item.get("input_id")
+            if not isinstance(raw_id, str) or not raw_id.strip():
+                tasks.append(
+                    {
+                        "idx": idx,
+                        "error_res": {
+                            "input_id": raw_id if isinstance(raw_id, str) else None,
+                            "code": item.get("code") if isinstance(item.get("code"), str) else None,
+                            "match_status": "error",
+                            "error_code": "INVALID_INPUT",
+                            "error": "Item is missing required non-empty string 'input_id'",
+                        },
+                    }
+                )
+                continue
+
+            input_id = raw_id.strip()
+            if input_id in seen_ids:
+                tasks.append(
+                    {
+                        "idx": idx,
+                        "error_res": {
+                            "input_id": input_id,
+                            "code": item.get("code") if isinstance(item.get("code"), str) else None,
+                            "match_status": "error",
+                            "error_code": "DUPLICATE_INPUT_ID",
+                            "error": f"Duplicate input_id '{input_id}': input_id must be unique within a batch",
+                        },
+                    }
+                )
+                continue
+
+            seen_ids.add(input_id)
+            tasks.append(
+                {
+                    "idx": idx,
+                    "item": item,
+                    "input_id": input_id,
+                }
+            )
+
+        def _read_worker(t: dict) -> tuple[int, dict]:
+            if "error_res" in t:
+                return t["idx"], t["error_res"]
+
+            idx = t["idx"]
+            item = t["item"]
+            input_id = t["input_id"]
 
             raw_code = item.get("code")
             if not isinstance(raw_code, str) or not 1 <= len(raw_code.strip()) <= 200:
-                return {
+                return idx, {
                     "input_id": input_id,
                     "code": raw_code if isinstance(raw_code, str) else None,
                     "match_status": "error",
+                    "error_code": "INVALID_INPUT",
                     "error": "code must be a string containing 1..200 characters",
                 }
 
             code_clean = raw_code.strip()
             family = item.get("family")
             if family is not None and (not isinstance(family, str) or not family.strip()):
-                return {
+                return idx, {
                     "input_id": input_id,
                     "code": code_clean,
                     "match_status": "error",
+                    "error_code": "INVALID_INPUT",
                     "error": "family must be a non-empty string when provided",
                 }
 
@@ -544,69 +698,133 @@ class Service:
             if document_guid is not None and (
                 not isinstance(document_guid, str) or not document_guid.strip()
             ):
-                return {
+                return idx, {
                     "input_id": input_id,
                     "code": code_clean,
                     "match_status": "error",
+                    "error_code": "INVALID_INPUT",
                     "error": "document_guid must be a non-empty string when provided",
                 }
 
             try:
                 card = self.read_norm(code_clean, family=family, document_guid=document_guid)
                 if detail_level == "compact":
-                    compact_card = {
-                        "input_id": input_id,
-                        "code": card.get("code"),
-                        "name": card.get("name"),
-                        "unit": card.get("unit"),
-                        "family": card.get("family"),
-                        "hierarchy": card.get("hierarchy"),
-                        "massa": card.get("massa"),
-                        "special_indicators": card.get("special_indicators"),
-                        "document_guid": card.get("document_guid"),
-                        "record_id": card.get("record_id"),
-                        "edition": card.get("edition"),
-                        "provenance": card.get("provenance"),
-                        "match_status": card.get("match_status"),
-                        "message": card.get("message"),
-                        "total_editions": card.get("total_editions", 0),
-                        "has_multiple_editions": card.get("has_multiple_editions", False),
-                        "editions_note": card.get("editions_note"),
-                        "options": card.get("options"),
-                    }
-                    if card.get("match_status") == "exact":
+                    match_status = card.get("match_status")
+                    if match_status == "exact":
+                        hier = card.get("hierarchy") or {}
+                        compact_hier = {
+                            "collection": hier.get("collection"),
+                            "department": hier.get("department"),
+                            "section": hier.get("section"),
+                            "subsection": hier.get("subsection"),
+                            "table": hier.get("table"),
+                        }
                         resources = card.get("resources") or []
-                        compact_card["resources_count"] = len(resources)
-                        compact_card["resources"] = [
-                            {
-                                "code": r.get("code"),
-                                "name": r.get("name"),
-                                "unit": r.get("unit"),
-                                "quantity": r.get("quantity"),
-                            }
-                            for r in resources
-                        ]
-                    return compact_card
+                        return idx, {
+                            "input_id": input_id,
+                            "code": card.get("code"),
+                            "name": card.get("name"),
+                            "unit": card.get("unit"),
+                            "family": card.get("family"),
+                            "hierarchy": compact_hier,
+                            "work_steps": card.get("work_steps", []),
+                            "resources_count": len(resources),
+                            "resources": [
+                                {
+                                    "code": r.get("code"),
+                                    "name": r.get("name"),
+                                    "unit": r.get("unit"),
+                                    "quantity": r.get("quantity"),
+                                }
+                                for r in resources
+                            ],
+                            "massa": card.get("massa"),
+                            "special_indicators": card.get("special_indicators"),
+                            "document_guid": card.get("document_guid"),
+                            "record_id": card.get("record_id"),
+                            "edition": card.get("edition"),
+                            "provenance": card.get("provenance"),
+                            "match_status": "exact",
+                            "message": card.get("message"),
+                            "total_editions": card.get("total_editions", 0),
+                            "has_multiple_editions": card.get("has_multiple_editions", False),
+                            "editions_note": card.get("editions_note"),
+                        }
+                    elif match_status == "ambiguous":
+                        return idx, {
+                            "input_id": input_id,
+                            "code": card.get("code"),
+                            "name": None,
+                            "unit": None,
+                            "family": None,
+                            "hierarchy": None,
+                            "work_steps": [],
+                            "resources_count": 0,
+                            "resources": [],
+                            "document_guid": None,
+                            "record_id": None,
+                            "edition": None,
+                            "provenance": None,
+                            "match_status": "ambiguous",
+                            "message": card.get("message"),
+                            "options": [
+                                {
+                                    "code": opt.get("code"),
+                                    "family": opt.get("family"),
+                                    "name": opt.get("name"),
+                                    "unit": opt.get("unit"),
+                                    "collection": opt.get("collection"),
+                                    "document_guid": opt.get("document_guid"),
+                                    "total_editions": opt.get("total_editions"),
+                                    "provenance": opt.get("provenance"),
+                                }
+                                for opt in (card.get("options") or [])
+                            ],
+                        }
+                    else:  # not_found or unverified
+                        return idx, {
+                            "input_id": input_id,
+                            "code": card.get("code"),
+                            "name": None,
+                            "unit": None,
+                            "family": None,
+                            "hierarchy": None,
+                            "work_steps": [],
+                            "resources_count": 0,
+                            "resources": [],
+                            "document_guid": None,
+                            "record_id": None,
+                            "edition": None,
+                            "provenance": None,
+                            "match_status": match_status,
+                            "message": card.get("message"),
+                        }
                 else:
-                    return {"input_id": input_id, **card}
+                    return idx, {"input_id": input_id, **card}
             except Exception as exc:
-                return {
+                err_dict = format_batch_error(exc)
+                return idx, {
                     "input_id": input_id,
                     "code": code_clean,
                     "match_status": "error",
-                    "error": str(exc),
+                    **err_dict,
                 }
 
-        max_workers = min(4, len(items))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            indexed_items = list(enumerate(items, 1))
-            futures = [executor.submit(_read_single, idx, it) for idx, it in indexed_items]
-            results = [f.result() for f in futures]
+        executable_tasks = [t for t in tasks if "error_res" not in t]
+        static_results = [(t["idx"], t["error_res"]) for t in tasks if "error_res" in t]
 
+        if executable_tasks:
+            max_workers = min(4, len(executable_tasks))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                async_results = list(executor.map(_read_worker, executable_tasks))
+        else:
+            async_results = []
+
+        all_results = sorted(static_results + async_results, key=lambda x: x[0])
         return {
             "total_items": len(items),
             "detail_level": detail_level,
-            "results": results,
+            "results": [r[1] for r in all_results],
         }
 
     def datasets(self, limit=20, offset=0):

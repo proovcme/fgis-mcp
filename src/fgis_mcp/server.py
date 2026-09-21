@@ -125,7 +125,7 @@ def create_server(config):
         Results are strictly independent: each item returns its own match_status
         ('exact', 'ambiguous', 'not_found', or 'error').
         When ambiguous, returns disambiguation options; when not_found, guards against hallucinated codes.
-        detail_level can be 'compact' (default, lightweight card with resources summary) or 'full'.
+        detail_level can be 'compact' (default, lightweight card preserving work_steps and compact resources) or 'full'.
         Preserves input_id on every result. Errors in individual items are isolated.
         """
         return service.batch_read_norms(items, detail_level=detail_level)
