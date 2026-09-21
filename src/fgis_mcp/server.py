@@ -14,8 +14,8 @@ def create_server(config):
         instructions=(
             "FGIS MCP is an evidence-first factual source for official FGIS CS (Минстрой России) data. "
             "Evidence rule: no evidence from MCP -> no fact in answer (UNSUPPORTED_BY_FGIS_MCP). "
-            "1. Search first: before claiming that a norm exists or proposing a norm, call fgis_search_norms. "
-            "2. Read the specific norm: before claiming what a norm includes, its unit, work steps, resources, mass, or technical characteristics, call fgis_read_norm. It returns the self-contained norm card (hierarchy, work steps, resources, mass, separate editions, structured provenance). Do NOT call fgis_read_document merely to inspect norm resources or work steps. "
+            "1. Search first: before claiming that a norm exists or proposing a norm, call fgis_search_norms (or fgis_batch_search_norms for multiple items). "
+            "2. Read the specific norm: before claiming what a norm includes, its unit, work steps, resources, mass, or technical characteristics, call fgis_read_norm (or fgis_batch_read_norms for multiple items). It returns the self-contained norm card (hierarchy, work steps, resources, mass, separate editions, structured provenance). Do NOT call fgis_read_document merely to inspect norm resources or work steps. "
             "3. Read official documents: before any normative conclusion, technical part citation, or methodology rule, read the official text via fgis_read_document, fgis_search_document, fgis_document_outline or fgis_read_document_table. These tools provide surrounding context (technical parts, general provisions, table coefficients, annexes) and do NOT duplicate the norm card. "
             "4. Never reconstruct norm codes from model memory; never invent codes absent from MCP results. "
             "5. Never invent analogues; show analogues only if returned by MCP search, and label them as candidates. "
@@ -101,6 +101,34 @@ def create_server(config):
         Do NOT call fgis_read_document merely to inspect norm resources or work steps — use fgis_read_norm instead.
         """
         return service.read_norm(code, family=family, document_guid=document_guid)
+
+    @server.tool(annotations=read)
+    def fgis_batch_search_norms(
+        items: list[dict],
+    ) -> dict:
+        """Search multiple queries for norm candidates in a single bounded batch (1..10 items).
+        Each item must contain 'input_id' and 'query', and optionally 'family' (e.g. 'ГЭСН', 'ГЭСНм')
+        and 'limit' (default 5, max 10).
+        Always returns candidates only (match_status='candidate' or 'not_found'); never assigns 'exact'.
+        Use this tool before proposing norms for a list of work items. Do not invent norm codes absent from results.
+        Preserves input_id on every result. Errors in individual items are isolated.
+        """
+        return service.batch_search_norms(items)
+
+    @server.tool(annotations=read)
+    def fgis_batch_read_norms(
+        items: list[dict],
+        detail_level: str = "compact",
+    ) -> dict:
+        """Read and verify multiple exact bare norm cards online in a single bounded batch (1..10 items).
+        Each item must contain 'input_id' and 'code', and optionally 'family' and 'document_guid'.
+        Results are strictly independent: each item returns its own match_status
+        ('exact', 'ambiguous', 'not_found', or 'error').
+        When ambiguous, returns disambiguation options; when not_found, guards against hallucinated codes.
+        detail_level can be 'compact' (default, lightweight card preserving work_steps and compact resources) or 'full'.
+        Preserves input_id on every result. Errors in individual items are isolated.
+        """
+        return service.batch_read_norms(items, detail_level=detail_level)
 
     @server.tool(annotations=read)
     def fgis_read_document(

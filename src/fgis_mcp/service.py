@@ -1,3 +1,4 @@
+import concurrent.futures
 import json
 import re
 
@@ -5,7 +6,7 @@ from filelock import FileLock, Timeout
 
 from . import jobs
 from .documents import OnlineDocuments
-from .errors import LocalDatasetIncompleteError, NotFoundError
+from .errors import FgisError, LocalDatasetIncompleteError, NotFoundError
 from .network import Network
 from .normalize import norm_cards
 from .storage import Dataset, now
@@ -32,6 +33,28 @@ def page(items, limit, offset):
         "offset": offset,
         "items": items[offset : offset + limit],
         "next_offset": offset + limit if offset + limit < len(items) else None,
+    }
+
+
+def format_batch_error(exc: Exception) -> dict:
+    if isinstance(exc, FgisError):
+        return {
+            "error_code": exc.code,
+            "error": exc.message,
+        }
+    if isinstance(exc, ValueError):
+        return {
+            "error_code": "INVALID_INPUT",
+            "error": str(exc),
+        }
+    if isinstance(exc, TimeoutError):
+        return {
+            "error_code": "TIMEOUT",
+            "error": "Превышено время ожидания ответа от ФГИС ЦС",
+        }
+    return {
+        "error_code": "INTERNAL_ERROR",
+        "error": "Внутренняя ошибка обработки позиции",
     }
 
 
@@ -371,6 +394,437 @@ class Service:
             "provenance": {**meta, "fetched_at": now()},
             "edition_selection": "All returned publications retained; numeric record IDs do not prove currency",
             "coverage": "Pagination is local to this API response; upstream search completeness is unknown",
+        }
+
+    def batch_search_norms(self, items: list[dict]) -> dict:
+        """Execute multiple norm searches in a single bounded batch (1..10 items) with candidate-only compact responses."""
+        if not isinstance(items, list) or not (1 <= len(items) <= 10):
+            raise ValueError("items must be a list containing 1..10 elements")
+
+        seen_ids = set()
+        tasks = []
+        for idx, item in enumerate(items, 1):
+            if not isinstance(item, dict):
+                tasks.append(
+                    {
+                        "idx": idx,
+                        "error_res": {
+                            "input_id": None,
+                            "query": None,
+                            "total": 0,
+                            "candidates": [],
+                            "match_status": "error",
+                            "error_code": "INVALID_INPUT",
+                            "error": "Item must be a dictionary with 'input_id' and 'query'",
+                        },
+                    }
+                )
+                continue
+
+            raw_id = item.get("input_id")
+            if not isinstance(raw_id, str) or not raw_id.strip():
+                tasks.append(
+                    {
+                        "idx": idx,
+                        "error_res": {
+                            "input_id": raw_id if isinstance(raw_id, str) else None,
+                            "query": item.get("query") if isinstance(item.get("query"), str) else None,
+                            "total": 0,
+                            "candidates": [],
+                            "match_status": "error",
+                            "error_code": "INVALID_INPUT",
+                            "error": "Item is missing required non-empty string 'input_id'",
+                        },
+                    }
+                )
+                continue
+
+            input_id = raw_id.strip()
+            if input_id in seen_ids:
+                tasks.append(
+                    {
+                        "idx": idx,
+                        "error_res": {
+                            "input_id": input_id,
+                            "query": item.get("query") if isinstance(item.get("query"), str) else None,
+                            "total": 0,
+                            "candidates": [],
+                            "match_status": "error",
+                            "error_code": "DUPLICATE_INPUT_ID",
+                            "error": f"Duplicate input_id '{input_id}': input_id must be unique within a batch",
+                        },
+                    }
+                )
+                continue
+
+            seen_ids.add(input_id)
+            tasks.append(
+                {
+                    "idx": idx,
+                    "item": item,
+                    "input_id": input_id,
+                }
+            )
+
+        def _search_worker(t: dict) -> tuple[int, dict]:
+            if "error_res" in t:
+                return t["idx"], t["error_res"]
+
+            idx = t["idx"]
+            item = t["item"]
+            input_id = t["input_id"]
+
+            raw_query = item.get("query")
+            if not isinstance(raw_query, str) or not 1 <= len(raw_query.strip()) <= 200:
+                return idx, {
+                    "input_id": input_id,
+                    "query": raw_query if isinstance(raw_query, str) else None,
+                    "total": 0,
+                    "candidates": [],
+                    "match_status": "error",
+                    "error_code": "INVALID_INPUT",
+                    "error": "query must be a string containing 1..200 characters",
+                }
+
+            q_clean = raw_query.strip()
+            family = item.get("family")
+            if family is not None:
+                if not isinstance(family, str) or not family.strip():
+                    return idx, {
+                        "input_id": input_id,
+                        "query": q_clean,
+                        "total": 0,
+                        "candidates": [],
+                        "match_status": "error",
+                        "error_code": "INVALID_INPUT",
+                        "error": "family must be a non-empty string when provided",
+                    }
+                family = family.strip()
+
+            raw_limit = item.get("limit", 5)
+            try:
+                limit = int(raw_limit)
+                if not 1 <= limit <= 10:
+                    limit = 5
+            except (ValueError, TypeError):
+                limit = 5
+
+            try:
+                records, _, meta = self.network.get_json(
+                    "FullTextSearch/SearchEstimatedRates", {"search": q_clean}
+                )
+                cards = norm_cards(records)
+                if family:
+                    family_clean = family.casefold()
+                    cards = [c for c in cards if (c.get("family") or "").strip().casefold() == family_clean]
+
+                cards = cards[:limit]
+                candidates = []
+                for c in cards:
+                    coll = (c.get("hierarchy") or {}).get("collection") or (c.get("source") or {}).get(
+                        "document"
+                    )
+                    c_ev = c.get("evidence") or {}
+                    c_src = c.get("source") or {}
+                    candidates.append(
+                        {
+                            "code": c.get("code"),
+                            "family": c.get("family"),
+                            "name": c.get("name"),
+                            "unit": c.get("unit"),
+                            "collection": coll,
+                            "document_guid": c.get("document_guid"),
+                            "match_status": "candidate",
+                            "evidence": {
+                                "source": "online_api",
+                                "document_guid": c.get("document_guid"),
+                                "record_id": c_src.get("record_id") or c_ev.get("record_id"),
+                                "record_sha256": c_src.get("record_sha256") or c_ev.get("sha256"),
+                            },
+                        }
+                    )
+
+                provenance = {
+                    "source": "online_api",
+                    "source_url": meta.get("source_url"),
+                    "sha256": meta.get("sha256"),
+                    "bytes": meta.get("bytes"),
+                    "fetched_at": now(),
+                }
+
+                if not candidates:
+                    return idx, {
+                        "input_id": input_id,
+                        "query": q_clean,
+                        "total": 0,
+                        "candidates": [],
+                        "match_status": "not_found",
+                        "message": "Прямая норма ФСНБ через FGIS MCP не подтверждена",
+                        "provenance": provenance,
+                    }
+
+                return idx, {
+                    "input_id": input_id,
+                    "query": q_clean,
+                    "total": len(candidates),
+                    "candidates": candidates,
+                    "match_status": "candidate",
+                    "message": "Найдены кандидаты норм",
+                    "provenance": provenance,
+                }
+            except Exception as exc:
+                err_dict = format_batch_error(exc)
+                return idx, {
+                    "input_id": input_id,
+                    "query": q_clean,
+                    "total": 0,
+                    "candidates": [],
+                    "match_status": "error",
+                    **err_dict,
+                }
+
+        executable_tasks = [t for t in tasks if "error_res" not in t]
+        static_results = [(t["idx"], t["error_res"]) for t in tasks if "error_res" in t]
+
+        if executable_tasks:
+            max_workers = min(4, len(executable_tasks))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                async_results = list(executor.map(_search_worker, executable_tasks))
+        else:
+            async_results = []
+
+        all_results = sorted(static_results + async_results, key=lambda x: x[0])
+        return {
+            "total_items": len(items),
+            "results": [r[1] for r in all_results],
+        }
+
+    def batch_read_norms(self, items: list[dict], detail_level: str = "compact") -> dict:
+        """Read and verify multiple norm cards online in a single bounded batch (1..10 items) with fault-isolated results."""
+        if not isinstance(items, list) or not (1 <= len(items) <= 10):
+            raise ValueError("items must be a list containing 1..10 elements")
+        if detail_level not in {"compact", "full"}:
+            raise ValueError("detail_level must be 'compact' or 'full'")
+
+        seen_ids = set()
+        tasks = []
+        for idx, item in enumerate(items, 1):
+            if not isinstance(item, dict):
+                tasks.append(
+                    {
+                        "idx": idx,
+                        "error_res": {
+                            "input_id": None,
+                            "code": None,
+                            "match_status": "error",
+                            "error_code": "INVALID_INPUT",
+                            "error": "Item must be a dictionary with 'input_id' and 'code'",
+                        },
+                    }
+                )
+                continue
+
+            raw_id = item.get("input_id")
+            if not isinstance(raw_id, str) or not raw_id.strip():
+                tasks.append(
+                    {
+                        "idx": idx,
+                        "error_res": {
+                            "input_id": raw_id if isinstance(raw_id, str) else None,
+                            "code": item.get("code") if isinstance(item.get("code"), str) else None,
+                            "match_status": "error",
+                            "error_code": "INVALID_INPUT",
+                            "error": "Item is missing required non-empty string 'input_id'",
+                        },
+                    }
+                )
+                continue
+
+            input_id = raw_id.strip()
+            if input_id in seen_ids:
+                tasks.append(
+                    {
+                        "idx": idx,
+                        "error_res": {
+                            "input_id": input_id,
+                            "code": item.get("code") if isinstance(item.get("code"), str) else None,
+                            "match_status": "error",
+                            "error_code": "DUPLICATE_INPUT_ID",
+                            "error": f"Duplicate input_id '{input_id}': input_id must be unique within a batch",
+                        },
+                    }
+                )
+                continue
+
+            seen_ids.add(input_id)
+            tasks.append(
+                {
+                    "idx": idx,
+                    "item": item,
+                    "input_id": input_id,
+                }
+            )
+
+        def _read_worker(t: dict) -> tuple[int, dict]:
+            if "error_res" in t:
+                return t["idx"], t["error_res"]
+
+            idx = t["idx"]
+            item = t["item"]
+            input_id = t["input_id"]
+
+            raw_code = item.get("code")
+            if not isinstance(raw_code, str) or not 1 <= len(raw_code.strip()) <= 200:
+                return idx, {
+                    "input_id": input_id,
+                    "code": raw_code if isinstance(raw_code, str) else None,
+                    "match_status": "error",
+                    "error_code": "INVALID_INPUT",
+                    "error": "code must be a string containing 1..200 characters",
+                }
+
+            code_clean = raw_code.strip()
+            family = item.get("family")
+            if family is not None and (not isinstance(family, str) or not family.strip()):
+                return idx, {
+                    "input_id": input_id,
+                    "code": code_clean,
+                    "match_status": "error",
+                    "error_code": "INVALID_INPUT",
+                    "error": "family must be a non-empty string when provided",
+                }
+
+            document_guid = item.get("document_guid")
+            if document_guid is not None and (
+                not isinstance(document_guid, str) or not document_guid.strip()
+            ):
+                return idx, {
+                    "input_id": input_id,
+                    "code": code_clean,
+                    "match_status": "error",
+                    "error_code": "INVALID_INPUT",
+                    "error": "document_guid must be a non-empty string when provided",
+                }
+
+            try:
+                card = self.read_norm(code_clean, family=family, document_guid=document_guid)
+                if detail_level == "compact":
+                    match_status = card.get("match_status")
+                    if match_status == "exact":
+                        hier = card.get("hierarchy") or {}
+                        compact_hier = {
+                            "collection": hier.get("collection"),
+                            "department": hier.get("department"),
+                            "section": hier.get("section"),
+                            "subsection": hier.get("subsection"),
+                            "table": hier.get("table"),
+                        }
+                        resources = card.get("resources") or []
+                        return idx, {
+                            "input_id": input_id,
+                            "code": card.get("code"),
+                            "name": card.get("name"),
+                            "unit": card.get("unit"),
+                            "family": card.get("family"),
+                            "hierarchy": compact_hier,
+                            "work_steps": card.get("work_steps", []),
+                            "resources_count": len(resources),
+                            "resources": [
+                                {
+                                    "code": r.get("code"),
+                                    "name": r.get("name"),
+                                    "unit": r.get("unit"),
+                                    "quantity": r.get("quantity"),
+                                }
+                                for r in resources
+                            ],
+                            "massa": card.get("massa"),
+                            "special_indicators": card.get("special_indicators"),
+                            "document_guid": card.get("document_guid"),
+                            "record_id": card.get("record_id"),
+                            "edition": card.get("edition"),
+                            "provenance": card.get("provenance"),
+                            "match_status": "exact",
+                            "message": card.get("message"),
+                            "total_editions": card.get("total_editions", 0),
+                            "has_multiple_editions": card.get("has_multiple_editions", False),
+                            "editions_note": card.get("editions_note"),
+                        }
+                    elif match_status == "ambiguous":
+                        return idx, {
+                            "input_id": input_id,
+                            "code": card.get("code"),
+                            "name": None,
+                            "unit": None,
+                            "family": None,
+                            "hierarchy": None,
+                            "work_steps": [],
+                            "resources_count": 0,
+                            "resources": [],
+                            "document_guid": None,
+                            "record_id": None,
+                            "edition": None,
+                            "provenance": None,
+                            "match_status": "ambiguous",
+                            "message": card.get("message"),
+                            "options": [
+                                {
+                                    "code": opt.get("code"),
+                                    "family": opt.get("family"),
+                                    "name": opt.get("name"),
+                                    "unit": opt.get("unit"),
+                                    "collection": opt.get("collection"),
+                                    "document_guid": opt.get("document_guid"),
+                                    "total_editions": opt.get("total_editions"),
+                                    "provenance": opt.get("provenance"),
+                                }
+                                for opt in (card.get("options") or [])
+                            ],
+                        }
+                    else:  # not_found or unverified
+                        return idx, {
+                            "input_id": input_id,
+                            "code": card.get("code"),
+                            "name": None,
+                            "unit": None,
+                            "family": None,
+                            "hierarchy": None,
+                            "work_steps": [],
+                            "resources_count": 0,
+                            "resources": [],
+                            "document_guid": None,
+                            "record_id": None,
+                            "edition": None,
+                            "provenance": None,
+                            "match_status": match_status,
+                            "message": card.get("message"),
+                        }
+                else:
+                    return idx, {"input_id": input_id, **card}
+            except Exception as exc:
+                err_dict = format_batch_error(exc)
+                return idx, {
+                    "input_id": input_id,
+                    "code": code_clean,
+                    "match_status": "error",
+                    **err_dict,
+                }
+
+        executable_tasks = [t for t in tasks if "error_res" not in t]
+        static_results = [(t["idx"], t["error_res"]) for t in tasks if "error_res" in t]
+
+        if executable_tasks:
+            max_workers = min(4, len(executable_tasks))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                async_results = list(executor.map(_read_worker, executable_tasks))
+        else:
+            async_results = []
+
+        all_results = sorted(static_results + async_results, key=lambda x: x[0])
+        return {
+            "total_items": len(items),
+            "detail_level": detail_level,
+            "results": [r[1] for r in all_results],
         }
 
     def datasets(self, limit=20, offset=0):
