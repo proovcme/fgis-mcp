@@ -1,3 +1,4 @@
+import concurrent.futures
 import json
 import re
 
@@ -371,6 +372,241 @@ class Service:
             "provenance": {**meta, "fetched_at": now()},
             "edition_selection": "All returned publications retained; numeric record IDs do not prove currency",
             "coverage": "Pagination is local to this API response; upstream search completeness is unknown",
+        }
+
+    def batch_search_norms(self, items: list[dict]) -> dict:
+        """Execute multiple norm searches in a single bounded batch (1..10 items) with candidate-only compact responses."""
+        if not isinstance(items, list) or not (1 <= len(items) <= 10):
+            raise ValueError("items must be a list containing 1..10 elements")
+
+        def _search_single(idx: int, item: dict) -> dict:
+            if not isinstance(item, dict):
+                return {
+                    "input_id": f"item_{idx}",
+                    "query": None,
+                    "total": 0,
+                    "candidates": [],
+                    "match_status": "error",
+                    "error": "Item must be a dictionary with 'input_id' and 'query'",
+                }
+
+            input_id = item.get("input_id")
+            if not input_id or not isinstance(input_id, str):
+                input_id = f"item_{idx}"
+
+            raw_query = item.get("query")
+            if not isinstance(raw_query, str) or not 1 <= len(raw_query.strip()) <= 200:
+                return {
+                    "input_id": input_id,
+                    "query": raw_query if isinstance(raw_query, str) else None,
+                    "total": 0,
+                    "candidates": [],
+                    "match_status": "error",
+                    "error": "query must be a string containing 1..200 characters",
+                }
+
+            q_clean = raw_query.strip()
+            family = item.get("family")
+            if family is not None:
+                if not isinstance(family, str) or not family.strip():
+                    return {
+                        "input_id": input_id,
+                        "query": q_clean,
+                        "total": 0,
+                        "candidates": [],
+                        "match_status": "error",
+                        "error": "family must be a non-empty string when provided",
+                    }
+                family = family.strip()
+
+            raw_limit = item.get("limit", 5)
+            try:
+                limit = int(raw_limit)
+                if not 1 <= limit <= 10:
+                    limit = 5
+            except (ValueError, TypeError):
+                limit = 5
+
+            try:
+                records, _, meta = self.network.get_json(
+                    "FullTextSearch/SearchEstimatedRates", {"search": q_clean}
+                )
+                cards = norm_cards(records)
+                if family:
+                    family_clean = family.casefold()
+                    cards = [c for c in cards if (c.get("family") or "").strip().casefold() == family_clean]
+
+                cards = cards[:limit]
+                candidates = []
+                for c in cards:
+                    coll = (c.get("hierarchy") or {}).get("collection") or (c.get("source") or {}).get(
+                        "document"
+                    )
+                    c_ev = c.get("evidence") or {}
+                    c_src = c.get("source") or {}
+                    candidates.append(
+                        {
+                            "code": c.get("code"),
+                            "family": c.get("family"),
+                            "name": c.get("name"),
+                            "unit": c.get("unit"),
+                            "collection": coll,
+                            "document_guid": c.get("document_guid"),
+                            "match_status": "candidate",
+                            "evidence": {
+                                "source": "online_api",
+                                "document_guid": c.get("document_guid"),
+                                "record_id": c_src.get("record_id") or c_ev.get("record_id"),
+                                "sha256": c_ev.get("sha256") or c_src.get("record_sha256"),
+                            },
+                        }
+                    )
+
+                if not candidates:
+                    return {
+                        "input_id": input_id,
+                        "query": q_clean,
+                        "total": 0,
+                        "candidates": [],
+                        "match_status": "not_found",
+                        "message": "Прямая норма ФСНБ через FGIS MCP не подтверждена",
+                    }
+
+                return {
+                    "input_id": input_id,
+                    "query": q_clean,
+                    "total": len(candidates),
+                    "candidates": candidates,
+                    "match_status": "candidate",
+                    "message": "Найдены кандидаты норм",
+                }
+            except Exception as exc:
+                return {
+                    "input_id": input_id,
+                    "query": q_clean,
+                    "total": 0,
+                    "candidates": [],
+                    "match_status": "error",
+                    "error": str(exc),
+                }
+
+        max_workers = min(4, len(items))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            indexed_items = list(enumerate(items, 1))
+            futures = [executor.submit(_search_single, idx, it) for idx, it in indexed_items]
+            results = [f.result() for f in futures]
+
+        return {
+            "total_items": len(items),
+            "results": results,
+        }
+
+    def batch_read_norms(self, items: list[dict], detail_level: str = "compact") -> dict:
+        """Read and verify multiple norm cards online in a single bounded batch (1..10 items) with fault-isolated results."""
+        if not isinstance(items, list) or not (1 <= len(items) <= 10):
+            raise ValueError("items must be a list containing 1..10 elements")
+        if detail_level not in {"compact", "full"}:
+            raise ValueError("detail_level must be 'compact' or 'full'")
+
+        def _read_single(idx: int, item: dict) -> dict:
+            if not isinstance(item, dict):
+                return {
+                    "input_id": f"item_{idx}",
+                    "code": None,
+                    "match_status": "error",
+                    "error": "Item must be a dictionary with 'input_id' and 'code'",
+                }
+
+            input_id = item.get("input_id")
+            if not input_id or not isinstance(input_id, str):
+                input_id = f"item_{idx}"
+
+            raw_code = item.get("code")
+            if not isinstance(raw_code, str) or not 1 <= len(raw_code.strip()) <= 200:
+                return {
+                    "input_id": input_id,
+                    "code": raw_code if isinstance(raw_code, str) else None,
+                    "match_status": "error",
+                    "error": "code must be a string containing 1..200 characters",
+                }
+
+            code_clean = raw_code.strip()
+            family = item.get("family")
+            if family is not None and (not isinstance(family, str) or not family.strip()):
+                return {
+                    "input_id": input_id,
+                    "code": code_clean,
+                    "match_status": "error",
+                    "error": "family must be a non-empty string when provided",
+                }
+
+            document_guid = item.get("document_guid")
+            if document_guid is not None and (
+                not isinstance(document_guid, str) or not document_guid.strip()
+            ):
+                return {
+                    "input_id": input_id,
+                    "code": code_clean,
+                    "match_status": "error",
+                    "error": "document_guid must be a non-empty string when provided",
+                }
+
+            try:
+                card = self.read_norm(code_clean, family=family, document_guid=document_guid)
+                if detail_level == "compact":
+                    compact_card = {
+                        "input_id": input_id,
+                        "code": card.get("code"),
+                        "name": card.get("name"),
+                        "unit": card.get("unit"),
+                        "family": card.get("family"),
+                        "hierarchy": card.get("hierarchy"),
+                        "massa": card.get("massa"),
+                        "special_indicators": card.get("special_indicators"),
+                        "document_guid": card.get("document_guid"),
+                        "record_id": card.get("record_id"),
+                        "edition": card.get("edition"),
+                        "provenance": card.get("provenance"),
+                        "match_status": card.get("match_status"),
+                        "message": card.get("message"),
+                        "total_editions": card.get("total_editions", 0),
+                        "has_multiple_editions": card.get("has_multiple_editions", False),
+                        "editions_note": card.get("editions_note"),
+                        "options": card.get("options"),
+                    }
+                    if card.get("match_status") == "exact":
+                        resources = card.get("resources") or []
+                        compact_card["resources_count"] = len(resources)
+                        compact_card["resources"] = [
+                            {
+                                "code": r.get("code"),
+                                "name": r.get("name"),
+                                "unit": r.get("unit"),
+                                "quantity": r.get("quantity"),
+                            }
+                            for r in resources
+                        ]
+                    return compact_card
+                else:
+                    return {"input_id": input_id, **card}
+            except Exception as exc:
+                return {
+                    "input_id": input_id,
+                    "code": code_clean,
+                    "match_status": "error",
+                    "error": str(exc),
+                }
+
+        max_workers = min(4, len(items))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            indexed_items = list(enumerate(items, 1))
+            futures = [executor.submit(_read_single, idx, it) for idx, it in indexed_items]
+            results = [f.result() for f in futures]
+
+        return {
+            "total_items": len(items),
+            "detail_level": detail_level,
+            "results": results,
         }
 
     def datasets(self, limit=20, offset=0):
