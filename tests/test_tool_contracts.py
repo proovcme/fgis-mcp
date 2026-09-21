@@ -1,6 +1,8 @@
 import asyncio
 import json
 
+import pytest
+
 from fgis_mcp.errors import (
     AmbiguousSnapshotError,
     LocalDatasetIncompleteError,
@@ -651,7 +653,6 @@ def test_20_read_norm_same_family_multiple_editions_exact_with_diff(config, monk
 
 
 def test_21_compare_norms_collision_guards_against_cross_family(config, monkeypatch):
-    import pytest
     from fgis_mcp.service import Service
 
     svc = Service(config)
@@ -747,4 +748,3 @@ def test_22_dataset_query_and_history_handles_ambiguity_and_provenance(tmp_path)
     assert hist_fam["status"] == "complete"
     assert hist_fam["match_status"] == "exact"
     assert hist_fam["total_editions"] == 1
-

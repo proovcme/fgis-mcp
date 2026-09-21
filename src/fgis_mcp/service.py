@@ -18,11 +18,7 @@ def norm_entity_key(card: dict) -> tuple:
     code = (card.get("code") or "").strip().casefold()
     family = (card.get("family") or "").strip().casefold()
     hierarchy = card.get("hierarchy") or {}
-    collection = (
-        hierarchy.get("collection")
-        or (card.get("source") or {}).get("document")
-        or ""
-    )
+    collection = hierarchy.get("collection") or (card.get("source") or {}).get("document") or ""
     m = re.search(r"сборник\s*(\d+)", collection, re.IGNORECASE)
     coll_num = m.group(1) if m else None
     return (family, coll_num, code)
@@ -469,10 +465,7 @@ class Service:
             records = [
                 r
                 for r in records
-                if (
-                    r.get("document_guid")
-                    or (r.get("source") or {}).get("document_guid")
-                )
+                if (r.get("document_guid") or (r.get("source") or {}).get("document_guid"))
                 and (
                     (r.get("document_guid") or "").strip().casefold() == guid_clean
                     or ((r.get("source") or {}).get("document_guid") or "").strip().casefold() == guid_clean
@@ -488,7 +481,9 @@ class Service:
             entities.setdefault(norm_entity_key(r), []).append(r)
 
         if len(entities) > 1:
-            families = sorted({(r.get("family") or "").strip() for r in records if (r.get("family") or "").strip()})
+            families = sorted(
+                {(r.get("family") or "").strip() for r in records if (r.get("family") or "").strip()}
+            )
             families_str = f" ({', '.join(families)})" if families else ""
             raise ValueError(
                 f"Norm code '{code}' is ambiguous across {len(entities)} distinct entities{families_str}. "

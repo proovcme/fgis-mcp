@@ -767,14 +767,21 @@ class Dataset:
             def _is_provenance_verified(it: dict) -> bool:
                 ev = it.get("evidence")
                 if isinstance(ev, dict) and ev.get("source") in ("opendata", "online_api", "manual_import"):
-                    if ev.get("snapshot_uid") or ev.get("sha256") or ev.get("archive_sha256") or ev.get("source_url"):
+                    if (
+                        ev.get("snapshot_uid")
+                        or ev.get("sha256")
+                        or ev.get("archive_sha256")
+                        or ev.get("source_url")
+                    ):
                         return True
                 sp = it.get("snapshot_provenance")
                 if isinstance(sp, dict) and sp.get("snapshot_status") == "complete":
                     if sp.get("archive_sha256") or sp.get("xml_sha256") or sp.get("snapshot_uid"):
                         return True
                 src = it.get("source")
-                if isinstance(src, dict) and (src.get("snapshot_uid") or src.get("record_sha256") or src.get("document_guid")):
+                if isinstance(src, dict) and (
+                    src.get("snapshot_uid") or src.get("record_sha256") or src.get("document_guid")
+                ):
                     return True
                 if it.get("snapshot_uid") or it.get("provenance"):
                     return True
@@ -793,11 +800,15 @@ class Dataset:
                         it["match_status"] = "exact"
                     else:
                         it["match_status"] = "unverified"
-                        it["provenance_note"] = "Запись найдена в локальной базе, но официальный provenance не подтвержден"
+                        it["provenance_note"] = (
+                            "Запись найдена в локальной базе, но официальный provenance не подтвержден"
+                        )
                 else:
                     it["match_status"] = "candidate"
 
-            exact_families = {(it.get("family") or "").strip() for it in exact_items if (it.get("family") or "").strip()}
+            exact_families = {
+                (it.get("family") or "").strip() for it in exact_items if (it.get("family") or "").strip()
+            }
 
             if total == 0:
                 match_status = "not_found"
@@ -813,9 +824,7 @@ class Dataset:
                     if code_clean or any(it.get("code", "").strip().casefold() == q_clean for it in items)
                     else "candidate"
                 )
-                msg = (
-                    "Найдена точная норма ФСНБ" if match_status == "exact" else "Найдены кандидаты норм"
-                )
+                msg = "Найдена точная норма ФСНБ" if match_status == "exact" else "Найдены кандидаты норм"
             elif any(it.get("match_status") == "unverified" for it in items):
                 match_status = "unverified"
                 msg = "Запись найдена в локальной базе, но официальный provenance не подтвержден"
