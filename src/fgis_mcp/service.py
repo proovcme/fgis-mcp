@@ -38,13 +38,28 @@ class Service:
         rows, _, meta = self.network.get_json(path, params)
         return {"items": rows, "provenance": {**meta, "fetched_at": now()}}
 
-    def read_norm(self, code: str) -> dict:
+    def read_norm(
+        self,
+        code: str,
+        family: str | None = None,
+        document_guid: str | None = None,
+    ) -> dict:
         if not isinstance(code, str) or not 1 <= len(code.strip()) <= 200:
             raise ValueError("code must contain 1..200 characters")
         q_clean = code.strip()
         records, _, _ = self.network.get_json("FullTextSearch/SearchEstimatedRates", {"search": q_clean})
         cards = norm_cards(records)
         cards = [card for card in cards if card["code"].casefold() == q_clean.casefold()]
+        if family is not None:
+            family_clean = family.strip().casefold()
+            if not family_clean:
+                raise ValueError("family must be non-empty when provided")
+            cards = [card for card in cards if (card.get("family") or "").casefold() == family_clean]
+        if document_guid is not None:
+            guid_clean = document_guid.strip().casefold()
+            if not guid_clean:
+                raise ValueError("document_guid must be non-empty when provided")
+            cards = [card for card in cards if (card.get("document_guid") or "").casefold() == guid_clean]
 
         if not cards:
             return {
@@ -75,7 +90,11 @@ class Service:
                 "editions_note": None,
                 "editions": [],
                 "match_status": "not_found",
-                "message": "Прямая норма ФСНБ через FGIS MCP не подтверждена",
+                "message": (
+                    "Прямая норма ФСНБ с заданными фильтрами через FGIS MCP не подтверждена"
+                    if family is not None or document_guid is not None
+                    else "Прямая норма ФСНБ через FGIS MCP не подтверждена"
+                ),
             }
 
         primary = cards[0]

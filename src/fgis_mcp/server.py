@@ -78,14 +78,22 @@ def create_server(config):
         return service.online(query, limit, offset)
 
     @server.tool(annotations=read)
-    def fgis_read_norm(code: str, limit: int = 20, offset: int = 0) -> dict:
+    def fgis_read_norm(
+        code: str,
+        limit: int = 20,
+        offset: int = 0,
+        family: str | None = None,
+        document_guid: str | None = None,
+    ) -> dict:
         """Read exact bare norm card online: code, name, unit, hierarchy (collection/dept/section/table),
         work steps, resources, mass, special indicators, separate editions and structured provenance.
+        Use family (for example, 'ГЭСН' or 'ГЭСНм') and/or document_guid from
+        fgis_browse_source when the same numeric code exists in different collections.
         Returns a compact self-contained card without duplicated data.
         Use this tool before claiming what a norm includes, its unit, work steps, resources or technical characteristics.
         Do NOT call fgis_read_document merely to inspect norm resources or work steps — use fgis_read_norm instead.
         """
-        return service.read_norm(code)
+        return service.read_norm(code, family=family, document_guid=document_guid)
 
     @server.tool(annotations=read)
     def fgis_read_document(

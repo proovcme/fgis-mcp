@@ -515,3 +515,39 @@ def test_17_read_norm_and_read_document_separation_contract(config):
     assert "read the specific norm" in instr
     assert "fgis_read_norm" in instr
     assert "fgis_read_document" in instr
+
+
+def test_18_read_norm_filters_code_collision_by_family_and_document(config, monkeypatch):
+    from fgis_mcp.service import Service
+
+    svc = Service(config)
+    records = [
+        {
+            "id": 1,
+            "documentName": "Сборник 17. Оборудование<br/>Таблица ГЭСНм 17-01-001 Баки",
+            "documentTypeName": "ГЭСНм",
+            "normLegalDocPublishedGuid": "guid-m",
+            "normTableJson": [{"number": "17-01-001-01", "name": "Бак", "meterName": "шт"}],
+            "normCatalogWorkTableJson": [],
+            "normTableValueTableJson": [],
+        },
+        {
+            "id": 2,
+            "documentName": "Сборник 17. Водопровод<br/>Таблица ГЭСН 17-01-001 Ванны",
+            "documentTypeName": "ГЭСН",
+            "normLegalDocPublishedGuid": "guid-c",
+            "normTableJson": [{"number": "17-01-001-01", "name": "Ванна", "meterName": "10 компл"}],
+            "normCatalogWorkTableJson": [],
+            "normTableValueTableJson": [],
+        },
+    ]
+    meta = {"source_url": "https://test", "sha256": "collision"}
+    monkeypatch.setattr(svc.network, "get_json", lambda path, params=None: (records, 200, meta))
+
+    by_family = svc.read_norm("17-01-001-01", family="ГЭСН")
+    assert by_family["name"] == "Ванна"
+    assert by_family["total_editions"] == 1
+
+    by_document = svc.read_norm("17-01-001-01", document_guid="guid-c")
+    assert by_document["name"] == "Ванна"
+    assert by_document["document_guid"] == "guid-c"
