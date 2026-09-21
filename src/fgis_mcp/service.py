@@ -1080,8 +1080,13 @@ class Service:
         import uuid
         from pathlib import Path
 
-        from .opendata_xml import FsnbArchiveReader
-        from .storage import now, sha_file
+        from .opendata_xml import FsnbArchiveReader, extract_snapshot_id
+        from .storage import (
+            build_snapshot_uid,
+            check_snapshot_import_preconditions,
+            now,
+            sha_file,
+        )
 
         path = Path(archive_path).expanduser().resolve()
         if not path.is_file():
@@ -1101,46 +1106,37 @@ class Service:
 
         data = Dataset(self.config.root, dataset_id)
 
-        # Compute archive SHA-256 first for safe re-import check
+        # Compute archive SHA-256 and snapshot_uid before any writes
         file_sha256 = sha_file(path)
+        effective_snap_id = snapshot_id or extract_snapshot_id(path.name)
+        snap_uid = build_snapshot_uid(
+            dataset_number,
+            distribution_guid=distribution_guid,
+            snapshot_id=effective_snap_id,
+            archive_sha256=file_sha256,
+        )
 
-        # Check if already imported with the same SHA-256 in the same dataset_number and status == 'complete'
-        with data.connect() as conn:
-            row = conn.execute(
-                """SELECT snapshot_uid, snapshot_id, total_norms, total_fsbc, payload, proof
-                FROM snapshots
-                WHERE dataset_number=? AND (archive_sha256=? OR sha256=?) AND status='complete'""",
-                (dataset_number, file_sha256, file_sha256),
-            ).fetchone()
-            if row:
-                existing_meta = json.loads(row[4]) if row[4] else {}
-                existing_proof = json.loads(row[5]) if row[5] else existing_meta.get("proof")
-                if isinstance(existing_proof, dict) and existing_proof.get("status") == "complete":
-                    return {
-                        "dataset_id": dataset_id,
-                        "snapshot_uid": row[0],
-                        "snapshot_id": row[1],
-                        "total_norms": row[2],
-                        "total_fsbc": row[3],
-                        "xml_inventory": existing_meta.get("xml_files", {}),
-                        "sha256": file_sha256,
-                        "status": "complete",
-                        "proof": existing_proof,
-                        "reused_existing": True,
-                    }
+        reused, existing_info = check_snapshot_import_preconditions(
+            data,
+            snapshot_uid=snap_uid,
+            archive_sha256=file_sha256,
+            dataset_number=dataset_number,
+        )
+        if reused and existing_info:
+            return existing_info
 
         # Copy archive into raw in 1 MiB chunks without loading full file into memory
         raw_rel, h, file_size = data.raw_file(path, "zip")
 
         reader = FsnbArchiveReader(
             path,
-            snapshot_id=snapshot_id,
+            snapshot_id=effective_snap_id,
+            snapshot_uid=snap_uid,
             distribution_guid=distribution_guid,
             dataset_number=dataset_number,
             archive_sha256=h,
         )
         snap_id = reader.snapshot_id
-        snap_uid = reader.snapshot_uid
 
         receipt = {
             "source_url": f"file://{path.name}",

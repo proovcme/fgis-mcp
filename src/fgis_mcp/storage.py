@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .errors import AmbiguousSnapshotError, SnapshotNotFoundError
+from .errors import AmbiguousSnapshotError, SnapshotImmutableError, SnapshotNotFoundError
 
 
 def now():
@@ -57,6 +57,104 @@ def build_snapshot_uid(
     clean_snap = str(snapshot_id or "snapshot").strip()
     clean_sha = str(archive_sha256 or "").strip()[:16] or "unknown"
     return f"{clean_ds}:{clean_snap}:{clean_sha}"
+
+
+def check_snapshot_import_preconditions(
+    data: "Dataset",
+    snapshot_uid: str,
+    archive_sha256: str,
+    dataset_number: str = "7707082071-fsnb",
+) -> tuple[bool, dict | None]:
+    """Check snapshot import preconditions before performing any write operations.
+
+    Ensures that complete snapshots are strictly immutable:
+    - If a snapshot with `snapshot_uid` exists and is 'complete':
+        - If archive_sha256 matches existing SHA and proof is complete:
+            returns (True, existing_info_dict) for safe reuse.
+        - If archive_sha256 differs:
+            raises SnapshotImmutableError (no writes allowed).
+    - If an existing complete snapshot with the same dataset_number and archive_sha256 exists:
+        - If proof is complete: returns (True, existing_info_dict) for safe reuse.
+    - Otherwise returns (False, None) to indicate import should proceed.
+    """
+    clean_uid = str(snapshot_uid or "").strip()
+    clean_sha = str(archive_sha256 or "").strip()
+    clean_ds = str(dataset_number or "7707082071-fsnb").strip()
+
+    with data.connect() as conn:
+        if clean_uid:
+            row = conn.execute(
+                """SELECT snapshot_uid, snapshot_id, status, archive_sha256, sha256,
+                          total_norms, total_fsbc, proof, payload
+                FROM snapshots WHERE snapshot_uid=?""",
+                (clean_uid,),
+            ).fetchone()
+            if row:
+                (
+                    existing_uid,
+                    existing_sid,
+                    status,
+                    arch_sha,
+                    sha,
+                    total_norms,
+                    total_fsbc,
+                    proof_raw,
+                    payload_raw,
+                ) = row
+                if status == "complete":
+                    existing_sha = arch_sha or sha or ""
+                    if clean_sha and existing_sha and clean_sha != existing_sha:
+                        raise SnapshotImmutableError(
+                            f"Snapshot '{clean_uid}' is complete and immutable (SHA-256: {existing_sha}); "
+                            f"cannot overwrite with modified archive (SHA-256: {clean_sha})"
+                        )
+                    existing_proof = json.loads(proof_raw) if proof_raw else {}
+                    if not existing_proof and payload_raw:
+                        existing_proof = json.loads(payload_raw).get("proof", {})
+                    if isinstance(existing_proof, dict) and existing_proof.get("status") == "complete":
+                        meta = json.loads(payload_raw) if payload_raw else {}
+                        return True, {
+                            "dataset_id": data.id,
+                            "snapshot_uid": existing_uid,
+                            "snapshot_id": existing_sid,
+                            "total_norms": total_norms or 0,
+                            "total_fsbc": total_fsbc or 0,
+                            "xml_inventory": meta.get("xml_files", {}),
+                            "sha256": existing_sha or clean_sha,
+                            "status": "complete",
+                            "proof": existing_proof,
+                            "reused_existing": True,
+                        }
+
+        # Check by dataset_number + archive_sha256 if already imported as complete
+        if clean_sha:
+            row_sha = conn.execute(
+                """SELECT snapshot_uid, snapshot_id, total_norms, total_fsbc, proof, payload
+                FROM snapshots
+                WHERE dataset_number=? AND (archive_sha256=? OR sha256=?) AND status='complete'""",
+                (clean_ds, clean_sha, clean_sha),
+            ).fetchone()
+            if row_sha:
+                existing_uid, existing_sid, total_norms, total_fsbc, proof_raw, payload_raw = row_sha
+                existing_proof = json.loads(proof_raw) if proof_raw else {}
+                if not existing_proof and payload_raw:
+                    existing_proof = json.loads(payload_raw).get("proof", {})
+                if isinstance(existing_proof, dict) and existing_proof.get("status") == "complete":
+                    meta = json.loads(payload_raw) if payload_raw else {}
+                    return True, {
+                        "dataset_id": data.id,
+                        "snapshot_uid": existing_uid,
+                        "snapshot_id": existing_sid,
+                        "total_norms": total_norms or 0,
+                        "total_fsbc": total_fsbc or 0,
+                        "xml_inventory": meta.get("xml_files", {}),
+                        "sha256": clean_sha,
+                        "status": "complete",
+                        "proof": existing_proof,
+                        "reused_existing": True,
+                    }
+
+    return False, None
 
 
 def resolve_snapshot_ref(
@@ -542,10 +640,16 @@ class Dataset:
 
         with self.connect() as conn:
             existing = conn.execute(
-                "SELECT status FROM snapshots WHERE snapshot_uid=?",
+                "SELECT status, archive_sha256, sha256 FROM snapshots WHERE snapshot_uid=?",
                 (snap_uid,),
             ).fetchone()
-            if existing and existing[0] == "complete" and status != "complete":
+            if existing and existing[0] == "complete":
+                existing_sha = existing[1] or existing[2] or ""
+                if arch_sha and existing_sha and arch_sha != existing_sha:
+                    raise SnapshotImmutableError(
+                        f"Snapshot '{snap_uid}' is complete and immutable (SHA-256: {existing_sha}); "
+                        f"cannot overwrite with incoming SHA-256 {arch_sha}"
+                    )
                 return
 
             conn.execute(
@@ -602,8 +706,16 @@ class Dataset:
 
             target_uid = row[0] if row else snapshot_id
             existing = json.loads(row[1]) if row else {}
-            if existing.get("status") == "complete" and status != "complete":
-                return
+            if existing.get("status") == "complete":
+                existing_sha = existing.get("archive_sha256") or existing.get("sha256") or ""
+                incoming_sha = extra.get("archive_sha256") or extra.get("sha256") or ""
+                if incoming_sha and existing_sha and incoming_sha != existing_sha:
+                    raise SnapshotImmutableError(
+                        f"Snapshot '{target_uid}' is complete and immutable (SHA-256: {existing_sha}); "
+                        f"cannot overwrite with incoming SHA-256 {incoming_sha}"
+                    )
+                if status != "complete":
+                    return
             updated = {
                 **existing,
                 **extra,

@@ -90,33 +90,6 @@ def import_manual_file(
                         imported_count = len(cards)
                     except Exception:
                         pass
-                elif any("code" in r for r in parsed):
-                    try:
-                        cards = [dict(r) for r in parsed]
-                        for c in cards:
-                            c["evidence"] = {
-                                "source": "manual_import",
-                                "source_type": "json",
-                                "file_name": path.name,
-                                "sha256": digest,
-                                "verified": False,
-                                "unverified": True,
-                            }
-                            c["source"] = {
-                                "source": "manual_import",
-                                "file_name": path.name,
-                                "sha256": digest,
-                            }
-                            c["provenance"] = receipt
-                            c["snapshot_uid"] = None
-                            c["snapshot_id"] = None
-                            if "norm_id" not in c:
-                                c["norm_id"] = f"manual:{c.get('family', 'norm')}:{c.get('code', digest[:8])}"
-                        data.add_norms(task_key, cards, receipt)
-                        imported_type = "norms"
-                        imported_count = len(cards)
-                    except Exception:
-                        pass
             if imported_type == "unknown":
                 data.add_document(task_key, parsed, receipt)
                 imported_type = "document_json"

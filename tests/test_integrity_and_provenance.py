@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from fgis_mcp.config import Config
+from fgis_mcp.errors import SnapshotImmutableError
 from fgis_mcp.service import Service
 from fgis_mcp.storage import Dataset
 
@@ -249,6 +250,166 @@ def test_complete_snapshot_protected_from_corrupted_reimport(tmp_path):
     assert q["match_status"] == "exact"
 
 
+def test_immutable_snapshot_rejects_altered_partial_archive(tmp_path):
+    """Import of complete archive with fixed distribution_guid, followed by attempt to import
+    an altered partial archive with the same distribution_guid and changed norm name must be rejected;
+    snapshot row and norm payload must remain 100% unchanged; queries must return original name
+    and remain exact/verified.
+    """
+    fixed_guid = "00000000-0000-0000-0000-000000000001"
+    svc = Service(Config(root=tmp_path / "cfg"))
+
+    # 1. Create and import complete archive with original norm name
+    complete_zip = _make_complete_archive(tmp_path / "complete_original.zip")
+    res1 = svc.import_opendata_archive(
+        str(complete_zip),
+        distribution_guid=fixed_guid,
+        snapshot_id="20220518",
+    )
+    assert res1["status"] == "complete"
+    assert res1["proof"]["status"] == "complete"
+    snap_uid = res1["snapshot_uid"]
+    ds_id = res1["dataset_id"]
+    ds = Dataset(tmp_path / "cfg", ds_id)
+
+    # Capture original snapshot row and norm payload
+    with ds.connect() as conn:
+        orig_snap_row = conn.execute("SELECT * FROM snapshots WHERE snapshot_uid=?", (snap_uid,)).fetchone()
+        orig_norm_row = conn.execute(
+            "SELECT * FROM norms WHERE snapshot_uid=? AND code=?", (snap_uid, "01-01-001-01")
+        ).fetchone()
+
+    assert orig_snap_row is not None
+    assert orig_norm_row is not None
+
+    # Verify query returns original name and is exact / verified
+    q1 = ds.query(kind="norms", code="01-01-001-01", family="ГЭСН")
+    assert q1["match_status"] == "exact"
+    assert q1["items"][0]["name"] == "Разработка Группа 1"
+    assert q1["items"][0]["verified"] is True
+
+    # 2. Create altered partial archive with the SAME distribution_guid and altered norm name
+    altered_norm_xml = SAMPLE_NORM_XML.replace(
+        "Группа 1".encode("utf-8"), "Измененное наименование нормы".encode("utf-8")
+    )
+    altered_zip = tmp_path / "altered_partial.zip"
+    with zipfile.ZipFile(altered_zip, "w") as zf:
+        zf.writestr("ГЭСН.xml", altered_norm_xml)
+        zf.writestr("ФСБЦ_Мат&Оборуд.xml", SAMPLE_FSBC_MAT_XML)
+
+    raw_files_before = set((ds.path / "raw").glob("*")) if (ds.path / "raw").exists() else set()
+
+    # 3. Attempt to import the altered partial archive with the SAME distribution_guid
+    with pytest.raises(SnapshotImmutableError) as exc_info:
+        svc.import_opendata_archive(
+            str(altered_zip),
+            dataset_id=ds_id,
+            distribution_guid=fixed_guid,
+            snapshot_id="20220518",
+        )
+    assert exc_info.value.code == "SNAPSHOT_IMMUTABLE"
+
+    # Verify NO new raw files were created
+    raw_files_after = set((ds.path / "raw").glob("*")) if (ds.path / "raw").exists() else set()
+    assert raw_files_after == raw_files_before
+
+    # Verify snapshot row and norm row in DB are 100% identical to before
+    with ds.connect() as conn:
+        snap_row_after = conn.execute("SELECT * FROM snapshots WHERE snapshot_uid=?", (snap_uid,)).fetchone()
+        norm_row_after = conn.execute(
+            "SELECT * FROM norms WHERE snapshot_uid=? AND code=?", (snap_uid, "01-01-001-01")
+        ).fetchone()
+
+    assert snap_row_after == orig_snap_row
+    assert norm_row_after == orig_norm_row
+
+    # Verify query still returns original name and remains exact/verified
+    q2 = ds.query(kind="norms", code="01-01-001-01", family="ГЭСН")
+    assert q2["match_status"] == "exact"
+    assert q2["items"][0]["name"] == "Разработка Группа 1"
+    assert q2["items"][0]["verified"] is True
+
+
+def test_immutable_snapshot_rejects_altered_complete_archive(tmp_path):
+    """Import of complete archive with fixed distribution_guid, followed by attempt to import
+    another complete archive with the same distribution_guid but different SHA must be rejected
+    with SnapshotImmutableError, nothing overwritten.
+    """
+    fixed_guid = "00000000-0000-0000-0000-000000000002"
+    svc = Service(Config(root=tmp_path / "cfg"))
+
+    # 1. Create and import original complete archive
+    complete_zip = _make_complete_archive(tmp_path / "complete_orig.zip")
+    res1 = svc.import_opendata_archive(
+        str(complete_zip),
+        distribution_guid=fixed_guid,
+        snapshot_id="20220518",
+    )
+    assert res1["status"] == "complete"
+    snap_uid = res1["snapshot_uid"]
+    ds_id = res1["dataset_id"]
+    ds = Dataset(tmp_path / "cfg", ds_id)
+
+    with ds.connect() as conn:
+        orig_snap_row = conn.execute("SELECT * FROM snapshots WHERE snapshot_uid=?", (snap_uid,)).fetchone()
+        orig_norm_count = conn.execute(
+            "SELECT count(*) FROM norms WHERE snapshot_uid=?", (snap_uid,)
+        ).fetchone()[0]
+        orig_fsbc_count = conn.execute(
+            "SELECT count(*) FROM fsbc WHERE snapshot_uid=?", (snap_uid,)
+        ).fetchone()[0]
+
+    # 2. Create another complete archive (all 7 XMLs) with modified decree act
+    altered_norm_xml = SAMPLE_NORM_XML.replace(b"378/\xd0\xbf\xd1\x80", b"999/\xd0\xbf\xd1\x80")
+    altered_complete_zip = tmp_path / "complete_altered.zip"
+    with zipfile.ZipFile(altered_complete_zip, "w") as zf:
+        zf.writestr("ГЭСН.xml", altered_norm_xml)
+        zf.writestr("ГЭСНм.xml", SAMPLE_NORM_XML)
+        zf.writestr("ГЭСНр.xml", SAMPLE_NORM_XML)
+        zf.writestr("ГЭСНп.xml", SAMPLE_NORM_XML)
+        zf.writestr("ГЭСНмр.xml", SAMPLE_NORM_XML)
+        zf.writestr("ФСБЦ_Мат&Оборуд.xml", SAMPLE_FSBC_MAT_XML)
+        zf.writestr("ФСБЦ_Маш.xml", SAMPLE_FSBC_MACH_XML)
+
+    raw_files_before = set((ds.path / "raw").glob("*")) if (ds.path / "raw").exists() else set()
+
+    # 3. Attempt to import the altered complete archive with the SAME distribution_guid
+    with pytest.raises(SnapshotImmutableError) as exc_info:
+        svc.import_opendata_archive(
+            str(altered_complete_zip),
+            dataset_id=ds_id,
+            distribution_guid=fixed_guid,
+            snapshot_id="20220518",
+        )
+    assert exc_info.value.code == "SNAPSHOT_IMMUTABLE"
+
+    # Verify no raw files created and DB rows intact
+    raw_files_after = set((ds.path / "raw").glob("*")) if (ds.path / "raw").exists() else set()
+    assert raw_files_after == raw_files_before
+
+    with ds.connect() as conn:
+        snap_row_after = conn.execute("SELECT * FROM snapshots WHERE snapshot_uid=?", (snap_uid,)).fetchone()
+        norm_count_after = conn.execute(
+            "SELECT count(*) FROM norms WHERE snapshot_uid=?", (snap_uid,)
+        ).fetchone()[0]
+        fsbc_count_after = conn.execute(
+            "SELECT count(*) FROM fsbc WHERE snapshot_uid=?", (snap_uid,)
+        ).fetchone()[0]
+
+    assert snap_row_after == orig_snap_row
+    assert norm_count_after == orig_norm_count
+    assert fsbc_count_after == orig_fsbc_count
+
+    # 4. Re-importing identical complete archive returns reused_existing=True
+    res_reused = svc.import_opendata_archive(
+        str(complete_zip),
+        dataset_id=ds_id,
+        distribution_guid=fixed_guid,
+        snapshot_id="20220518",
+    )
+    assert res_reused.get("reused_existing") is True
+
+
 # ----------------------------------------------------------------------
 # 4. Worker job handling of partial/failed snapshots
 # ----------------------------------------------------------------------
@@ -302,13 +463,110 @@ def test_worker_job_reflects_partial_snapshot(tmp_path, monkeypatch):
     )
 
 
+def test_worker_job_rejects_altered_snapshot_immutable(tmp_path, monkeypatch):
+    """Worker task with altered archive for complete snapshot must fail with SNAPSHOT_IMMUTABLE,
+    without saving raw file or modifying database records.
+    """
+    import hashlib
+
+    from fgis_mcp import jobs
+    from fgis_mcp.worker import execute
+
+    cfg = Config(root=tmp_path / "cfg")
+    fixed_guid = "00000000-0000-0000-0000-000000000003"
+
+    # 1. Pre-import complete snapshot
+    complete_zip = _make_complete_archive(tmp_path / "complete.zip")
+    svc = Service(cfg)
+    res = svc.import_opendata_archive(
+        str(complete_zip),
+        distribution_guid=fixed_guid,
+        snapshot_id="20220518",
+    )
+    assert res["status"] == "complete"
+    ds_id = res["dataset_id"]
+    snap_uid = res["snapshot_uid"]
+    ds = Dataset(cfg.root, ds_id)
+
+    raw_files_before = set((ds.path / "raw").glob("*"))
+    with ds.connect() as conn:
+        orig_snap_row = conn.execute("SELECT * FROM snapshots WHERE snapshot_uid=?", (snap_uid,)).fetchone()
+        orig_norm_row = conn.execute(
+            "SELECT * FROM norms WHERE snapshot_uid=? AND code=?", (snap_uid, "01-01-001-01")
+        ).fetchone()
+
+    # 2. Create altered archive
+    altered_norm_xml = SAMPLE_NORM_XML.replace(
+        "Группа 1".encode("utf-8"), "Измененное имя воркером".encode("utf-8")
+    )
+    altered_zip = tmp_path / "altered_worker.zip"
+    with zipfile.ZipFile(altered_zip, "w") as zf:
+        zf.writestr("ГЭСН.xml", altered_norm_xml)
+        zf.writestr("ФСБЦ_Мат&Оборуд.xml", SAMPLE_FSBC_MAT_XML)
+
+    altered_bytes = altered_zip.read_bytes()
+    altered_sha = hashlib.sha256(altered_bytes).hexdigest()
+
+    monkeypatch.setattr(jobs, "launch", lambda config, job_id: job_id)
+    job_id = jobs.start(cfg, sources=["opendata"], max_tasks=10)
+
+    class MockAlteredNetwork:
+        def fetch(self, path, file=True):
+            return altered_bytes, {
+                "sha256": altered_sha,
+                "bytes": len(altered_bytes),
+                "source_url": "mock://fsnb_altered.zip",
+            }
+
+        def get_value(self, path, params=None):
+            return {}, b"{}", {"sha256": "dummy"}
+
+    # Point job to the existing dataset
+    job_file = cfg.root / "jobs" / job_id / "job.json"
+    data_job = json.loads(job_file.read_text("utf-8"))
+    data_job["dataset_id"] = ds_id
+    data_job["tasks"] = [
+        {
+            "kind": "opendata_file",
+            "source": "opendata",
+            "url": "mock://fsnb_altered.zip",
+            "filename": "data-20220518-structure.zip",
+            "dataset_number": "7707082071-fsnb",
+            "guid": fixed_guid,
+            "distribution_guid": fixed_guid,
+            "format": "zip",
+        }
+    ]
+    job_file.write_text(json.dumps(data_job), encoding="utf-8")
+
+    execute(cfg, job_id, MockAlteredNetwork())
+
+    job_state = jobs.status(cfg, job_id)
+    assert any(err.get("code") == "SNAPSHOT_IMMUTABLE" for err in job_state["errors"])
+
+    # Verify no raw file created and database unchanged
+    raw_files_after = set((ds.path / "raw").glob("*"))
+    assert raw_files_after == raw_files_before
+
+    with ds.connect() as conn:
+        snap_row_after = conn.execute("SELECT * FROM snapshots WHERE snapshot_uid=?", (snap_uid,)).fetchone()
+        norm_row_after = conn.execute(
+            "SELECT * FROM norms WHERE snapshot_uid=? AND code=?", (snap_uid, "01-01-001-01")
+        ).fetchone()
+
+    assert snap_row_after == orig_snap_row
+    assert norm_row_after == orig_norm_row
+
+
 # ----------------------------------------------------------------------
 # 5. Provenance separation: manual import vs verified OpenData vs API
 # ----------------------------------------------------------------------
 
 
 def test_manual_import_always_unverified_even_with_sha256(tmp_path):
-    """Manual import of custom JSON file must always produce match_status='unverified' and verified=False."""
+    """Manual import of normTableJson format produces match_status='unverified' and verified=False,
+    while unsupported JSON is safely preserved as document_json.
+    """
     svc = Service(Config(root=tmp_path / "cfg"))
 
     custom_json = tmp_path / "my_custom_norms.json"
@@ -316,12 +574,14 @@ def test_manual_import_always_unverified_even_with_sha256(tmp_path):
         json.dumps(
             [
                 {
-                    "code": "01-01-001-01",
-                    "family": "ГЭСН",
-                    "name": "Пользовательская норма",
-                    "unit": "100 м3",
-                    "evidence": {"source": "online_api"},  # Attempted spoofing
-                    "document_guid": "fake-guid-12345",
+                    "name": "ГЭСН 81-02-01-2022",
+                    "normTableJson": [
+                        {
+                            "Number": "01-01-001-01",
+                            "Name": "Пользовательская норма",
+                            "MeterName": "100 м3",
+                        }
+                    ],
                 }
             ]
         ),
@@ -331,6 +591,8 @@ def test_manual_import_always_unverified_even_with_sha256(tmp_path):
     ds_id = uuid.uuid4().hex
     Dataset(tmp_path / "cfg", ds_id, create=True)
     imp = svc.import_manual_file(ds_id, str(custom_json))
+    assert imp["imported_type"] == "norms"
+    assert imp["imported_count"] == 1
     ds = Dataset(tmp_path / "cfg", imp["dataset_id"])
 
     res = ds.query(kind="norms", code="01-01-001-01", family="ГЭСН")
@@ -341,6 +603,13 @@ def test_manual_import_always_unverified_even_with_sha256(tmp_path):
     assert item["unverified"] is True
     assert item["evidence"]["source"] == "manual_import"
     assert item["evidence"]["verified"] is False
+
+    # Unsupported JSON must be imported as document_json
+    unsupported_json = tmp_path / "unsupported_payload.json"
+    unsupported_json.write_text(json.dumps([{"code": "01-01-001-01", "other_key": "val"}]), encoding="utf-8")
+    imp_doc = svc.import_manual_file(ds_id, str(unsupported_json))
+    assert imp_doc["imported_type"] == "document_json"
+    assert imp_doc["imported_count"] == 1
 
 
 def test_online_api_provenance_verified_as_exact(tmp_path):
