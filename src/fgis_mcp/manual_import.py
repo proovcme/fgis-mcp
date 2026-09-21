@@ -67,7 +67,51 @@ def import_manual_file(
             if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
                 if any("normTableJson" in r for r in parsed):
                     try:
-                        cards = norm_cards(parsed)
+                        cards = norm_cards(parsed, default_source="manual_import")
+                        for c in cards:
+                            c["evidence"] = {
+                                "source": "manual_import",
+                                "source_type": "json",
+                                "file_name": path.name,
+                                "sha256": digest,
+                                "verified": False,
+                                "unverified": True,
+                            }
+                            c["source"] = {
+                                "source": "manual_import",
+                                "file_name": path.name,
+                                "sha256": digest,
+                            }
+                            c["provenance"] = receipt
+                            c["snapshot_uid"] = None
+                            c["snapshot_id"] = None
+                        data.add_norms(task_key, cards, receipt)
+                        imported_type = "norms"
+                        imported_count = len(cards)
+                    except Exception:
+                        pass
+                elif any("code" in r for r in parsed):
+                    try:
+                        cards = [dict(r) for r in parsed]
+                        for c in cards:
+                            c["evidence"] = {
+                                "source": "manual_import",
+                                "source_type": "json",
+                                "file_name": path.name,
+                                "sha256": digest,
+                                "verified": False,
+                                "unverified": True,
+                            }
+                            c["source"] = {
+                                "source": "manual_import",
+                                "file_name": path.name,
+                                "sha256": digest,
+                            }
+                            c["provenance"] = receipt
+                            c["snapshot_uid"] = None
+                            c["snapshot_id"] = None
+                            if "norm_id" not in c:
+                                c["norm_id"] = f"manual:{c.get('family', 'norm')}:{c.get('code', digest[:8])}"
                         data.add_norms(task_key, cards, receipt)
                         imported_type = "norms"
                         imported_count = len(cards)

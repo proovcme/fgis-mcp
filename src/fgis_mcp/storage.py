@@ -387,35 +387,62 @@ class Dataset:
 
     def add_norms(self, task_key, cards, receipt, *, save_receipt=True):
         with self.connect() as conn:
+            is_manual = (
+                task_key.startswith("manual:")
+                or (receipt or {}).get("route") == "manual_import"
+                or (
+                    isinstance((receipt or {}).get("request"), dict)
+                    and (receipt or {}).get("request", {}).get("kind") == "manual_import"
+                )
+                or str((receipt or {}).get("source_url") or "").startswith("manual://")
+            )
             for card in cards:
                 card = {**card, "provenance": receipt}
-                snap_id = card.get("snapshot_id")
-                if not snap_id and isinstance(card.get("source"), dict):
-                    snap_id = card["source"].get("snapshot_id")
-                snap_uid = card.get("snapshot_uid")
-                if not snap_uid and isinstance(card.get("source"), dict):
-                    snap_uid = card["source"].get("snapshot_uid")
-                if not snap_uid and isinstance(receipt, dict):
-                    snap_uid = receipt.get("snapshot_uid") or (
-                        receipt.get("request", {}).get("snapshot_uid")
-                        if isinstance(receipt.get("request"), dict)
-                        else None
-                    )
-                if not snap_uid and snap_id:
-                    row = conn.execute(
-                        "SELECT snapshot_uid FROM snapshots WHERE snapshot_uid=? OR snapshot_id=? ORDER BY (snapshot_uid=?) DESC",
-                        (snap_id, snap_id, snap_id),
-                    ).fetchone()
-                    if row:
-                        snap_uid = row[0]
-                    else:
-                        snap_uid = snap_id
+                if is_manual:
+                    snap_id = None
+                    snap_uid = None
+                    card["snapshot_id"] = None
+                    card["snapshot_uid"] = None
+                    card["evidence"] = {
+                        "source": "manual_import",
+                        "source_type": "json",
+                        "sha256": (receipt or {}).get("sha256"),
+                        "verified": False,
+                        "unverified": True,
+                    }
+                    card["source"] = {
+                        "source": "manual_import",
+                        "sha256": (receipt or {}).get("sha256"),
+                    }
+                else:
+                    snap_id = card.get("snapshot_id")
+                    if not snap_id and isinstance(card.get("source"), dict):
+                        snap_id = card["source"].get("snapshot_id")
+                    snap_uid = card.get("snapshot_uid")
+                    if not snap_uid and isinstance(card.get("source"), dict):
+                        snap_uid = card["source"].get("snapshot_uid")
+                    if not snap_uid and isinstance(receipt, dict):
+                        snap_uid = receipt.get("snapshot_uid") or (
+                            receipt.get("request", {}).get("snapshot_uid")
+                            if isinstance(receipt.get("request"), dict)
+                            else None
+                        )
+                    if not snap_uid and snap_id:
+                        row = conn.execute(
+                            "SELECT snapshot_uid FROM snapshots WHERE snapshot_uid=? OR snapshot_id=? ORDER BY (snapshot_uid=?) DESC",
+                            (snap_id, snap_id, snap_id),
+                        ).fetchone()
+                        if row:
+                            snap_uid = row[0]
+                        else:
+                            snap_uid = snap_id
 
                 norm_id = card.get("norm_id")
                 if not norm_id:
                     fam = card.get("family") or "ГЭСН"
                     code = card.get("code", "")
-                    norm_id = f"{snap_uid}:{fam}:{code}"
+                    prefix = f"manual:{uuid.uuid4().hex[:8]}" if is_manual else snap_uid
+                    norm_id = f"{prefix}:{fam}:{code}"
                     card["norm_id"] = norm_id
 
                 steps = card.get("work_steps") or []
@@ -514,6 +541,13 @@ class Dataset:
             snapshot_meta["archive_sha256"] = arch_sha
 
         with self.connect() as conn:
+            existing = conn.execute(
+                "SELECT status FROM snapshots WHERE snapshot_uid=?",
+                (snap_uid,),
+            ).fetchone()
+            if existing and existing[0] == "complete" and status != "complete":
+                return
+
             conn.execute(
                 """INSERT OR REPLACE INTO snapshots (
                     snapshot_uid, snapshot_id, dataset_number, distribution_guid, archive_sha256,
@@ -568,6 +602,8 @@ class Dataset:
 
             target_uid = row[0] if row else snapshot_id
             existing = json.loads(row[1]) if row else {}
+            if existing.get("status") == "complete" and status != "complete":
+                return
             updated = {
                 **existing,
                 **extra,
@@ -623,6 +659,8 @@ class Dataset:
 
             target_uid = row[0] if row else snapshot_id
             existing = json.loads(row[1]) if row else {}
+            if existing.get("status") == "complete":
+                return
             updated = {
                 **existing,
                 "snapshot_uid": target_uid,
@@ -721,6 +759,7 @@ class Dataset:
         zone_id=None,
         period_id=None,
         family=None,
+        include_incomplete: bool = False,
     ):
         if kind not in {"norms", "prices", "documents", "fsbc"}:
             raise ValueError("kind must be norms, prices, documents or fsbc")
@@ -742,14 +781,56 @@ class Dataset:
                     raise ValueError("Zone and period apply only to prices")
                 clauses.append(f"{field}=?")
                 params.append(value)
-        where = " WHERE " + " AND ".join(clauses) if clauses else ""
         key = {"norms": "norm_id", "prices": "price_id", "documents": "document_id", "fsbc": "fsbc_id"}[kind]
+
+        if kind == "norms" and not include_incomplete:
+            join_clauses = list(clauses)
+            join_clauses.append("(s.status = 'complete' OR s.status IS NULL)")
+            from_join = """
+                FROM norms n
+                LEFT JOIN snapshots s ON s.snapshot_uid = coalesce(
+                    n.snapshot_uid,
+                    (SELECT s2.snapshot_uid FROM snapshots s2 WHERE s2.snapshot_id = n.snapshot_id GROUP BY s2.snapshot_id HAVING count(*) = 1)
+                )
+            """
+            where = " WHERE " + " AND ".join(join_clauses)
+            count_sql = f"SELECT count(*) {from_join} {where}"
+            rows_sql = f"SELECT n.payload {from_join} {where} ORDER BY n.code, n.norm_id LIMIT ? OFFSET ?"
+        elif kind == "fsbc" and not include_incomplete:
+            join_clauses = list(clauses)
+            join_clauses.append("(s.status = 'complete' OR s.status IS NULL)")
+            from_join = """
+                FROM fsbc f
+                LEFT JOIN snapshots s ON (
+                    (f.snapshot_uid IS NOT NULL AND f.snapshot_uid = s.snapshot_uid)
+                    OR (f.snapshot_uid = s.snapshot_id)
+                    OR (f.snapshot_id IS NOT NULL AND f.snapshot_id = s.snapshot_id)
+                )
+            """
+            where = " WHERE " + " AND ".join(join_clauses)
+            count_sql = f"SELECT count(*) {from_join} {where}"
+            rows_sql = f"SELECT f.payload {from_join} {where} ORDER BY f.code, f.fsbc_id LIMIT ? OFFSET ?"
+        else:
+            where = " WHERE " + " AND ".join(clauses) if clauses else ""
+            count_sql = f"SELECT count(*) FROM {kind}" + where
+            rows_sql = f"SELECT payload FROM {kind}" + where + f" ORDER BY code, {key} LIMIT ? OFFSET ?"
+
         with self.connect() as conn:
-            total = conn.execute(f"SELECT count(*) FROM {kind}" + where, params).fetchone()[0]
+            total = conn.execute(count_sql, params).fetchone()[0]
             rows = conn.execute(
-                f"SELECT payload FROM {kind}" + where + f" ORDER BY code, {key} LIMIT ? OFFSET ?",
+                rows_sql,
                 [*params, limit, offset],
             ).fetchall()
+            snapshots_map = {}
+            if kind == "norms":
+                for s_row in conn.execute(
+                    "SELECT snapshot_uid, status, proof, coalesce(archive_sha256, sha256) FROM snapshots"
+                ).fetchall():
+                    snapshots_map[s_row[0]] = {
+                        "status": s_row[1],
+                        "proof": json.loads(s_row[2]) if s_row[2] else {},
+                        "archive_sha": s_row[3],
+                    }
         items = [json.loads(row[0]) for row in rows]
         if kind == "documents":
             items = [{k: v for k, v in item.items() if k != "data"} for item in items]
@@ -765,26 +846,53 @@ class Dataset:
             code_clean = (code or "").strip().casefold()
 
             def _is_provenance_verified(it: dict) -> bool:
+                # 1. Reject any manual import immediately
                 ev = it.get("evidence")
-                if isinstance(ev, dict) and ev.get("source") in ("opendata", "online_api", "manual_import"):
+                if isinstance(ev, dict) and ev.get("source") in ("manual_import", "manual"):
+                    return False
+                prov = it.get("provenance")
+                if isinstance(prov, dict):
+                    if prov.get("route") == "manual_import":
+                        return False
+                    src_url = str(prov.get("source_url") or "")
+                    if src_url.startswith("manual://"):
+                        return False
+                    req = prov.get("request")
+                    if isinstance(req, dict) and req.get("kind") == "manual_import":
+                        return False
+
+                # 2. Check if verified via official completed OpenData snapshot
+                snap_uid = (
+                    it.get("snapshot_uid")
+                    or (it.get("source") or {}).get("snapshot_uid")
+                    or (it.get("evidence") or {}).get("snapshot_uid")
+                )
+                if snap_uid:
+                    snap_info = snapshots_map.get(str(snap_uid))
                     if (
-                        ev.get("snapshot_uid")
-                        or ev.get("sha256")
-                        or ev.get("archive_sha256")
-                        or ev.get("source_url")
+                        snap_info
+                        and snap_info["status"] == "complete"
+                        and isinstance(snap_info["proof"], dict)
+                        and snap_info["proof"].get("status") == "complete"
                     ):
-                        return True
-                sp = it.get("snapshot_provenance")
-                if isinstance(sp, dict) and sp.get("snapshot_status") == "complete":
-                    if sp.get("archive_sha256") or sp.get("xml_sha256") or sp.get("snapshot_uid"):
-                        return True
-                src = it.get("source")
-                if isinstance(src, dict) and (
-                    src.get("snapshot_uid") or src.get("record_sha256") or src.get("document_guid")
-                ):
-                    return True
-                if it.get("snapshot_uid") or it.get("provenance"):
-                    return True
+                        arch_sha = snap_info["archive_sha"]
+                        if arch_sha and len(str(arch_sha)) == 64:
+                            return True
+                    # Missing, partial, or failed snapshot cannot confirm exact norm
+                    return False
+
+                # 3. Check if verified via official online API crawled receipt
+                if isinstance(prov, dict):
+                    src_url = str(prov.get("source_url") or "")
+                    if (
+                        src_url.startswith("https://fgiscs.minstroyrf.ru/")
+                        and prov.get("sha256")
+                        and len(str(prov["sha256"])) == 64
+                        and prov.get("fetched_at")
+                    ):
+                        if ev is None or ev.get("source") == "online_api":
+                            return True
+
                 return False
 
             exact_items = []
@@ -798,13 +906,19 @@ class Dataset:
                     exact_items.append(it)
                     if _is_provenance_verified(it):
                         it["match_status"] = "exact"
+                        it["verified"] = True
+                        it["unverified"] = False
                     else:
                         it["match_status"] = "unverified"
+                        it["verified"] = False
+                        it["unverified"] = True
                         it["provenance_note"] = (
                             "Запись найдена в локальной базе, но официальный provenance не подтвержден"
                         )
                 else:
                     it["match_status"] = "candidate"
+                    it["verified"] = False
+                    it["unverified"] = True
 
             exact_families = {
                 (it.get("family") or "").strip() for it in exact_items if (it.get("family") or "").strip()
@@ -813,11 +927,25 @@ class Dataset:
             if total == 0:
                 match_status = "not_found"
                 msg = "Прямая норма ФСНБ через FGIS MCP не подтверждена"
+                res["verified"] = False
+                res["unverified"] = False
             elif len(exact_families) > 1 and code_clean:
                 match_status = "ambiguous"
                 msg = f"Обнаружено несколько различных нормативных сущностей с данным шифром ({', '.join(sorted(exact_families))}). Уточните family."
                 for it in exact_items:
                     it["match_status"] = "ambiguous"
+                res["options"] = [
+                    {
+                        "family": it.get("family"),
+                        "code": it.get("code"),
+                        "name": it.get("name"),
+                        "unit": it.get("unit"),
+                    }
+                    for it in exact_items
+                ]
+                res["families_found"] = sorted(list(exact_families))
+                res["verified"] = False
+                res["unverified"] = False
             elif any(it.get("match_status") == "exact" for it in items):
                 match_status = (
                     "exact"
@@ -825,14 +953,20 @@ class Dataset:
                     else "candidate"
                 )
                 msg = "Найдена точная норма ФСНБ" if match_status == "exact" else "Найдены кандидаты норм"
+                res["verified"] = match_status == "exact"
+                res["unverified"] = not (match_status == "exact")
             elif any(it.get("match_status") == "unverified" for it in items):
                 match_status = "unverified"
                 msg = "Запись найдена в локальной базе, но официальный provenance не подтвержден"
+                res["verified"] = False
+                res["unverified"] = True
             else:
                 match_status = "candidate"
                 msg = (
                     "Найдены кандидаты норм (требуется проверка применимости и чтение состава работ/ресурсов)"
                 )
+                res["verified"] = False
+                res["unverified"] = True
 
             res["match_status"] = match_status
             res["message"] = msg
@@ -1239,18 +1373,44 @@ class Dataset:
             "records": base_records + records,
         }
 
-    def export(self, formats=("jsonl",)):
+    def export(self, formats=("jsonl",), include_incomplete: bool = False):
         if any(f not in {"jsonl", "parquet"} for f in formats):
             raise ValueError("Formats: jsonl, parquet (SQLite is always present)")
         outputs = []
         with self.connect() as conn:
             for table in ("norms", "prices", "documents", "fsbc"):
+                if table == "norms" and not include_incomplete:
+                    export_sql = """
+                        SELECT n.code, n.payload
+                        FROM norms n
+                        LEFT JOIN snapshots s ON s.snapshot_uid = coalesce(
+                            n.snapshot_uid,
+                            (SELECT s2.snapshot_uid FROM snapshots s2 WHERE s2.snapshot_id = n.snapshot_id GROUP BY s2.snapshot_id HAVING count(*) = 1)
+                        )
+                        WHERE (s.status = 'complete' OR s.status IS NULL)
+                        ORDER BY n.code
+                    """
+                elif table == "fsbc" and not include_incomplete:
+                    export_sql = """
+                        SELECT f.code, f.payload
+                        FROM fsbc f
+                        LEFT JOIN snapshots s ON (
+                            (f.snapshot_uid IS NOT NULL AND f.snapshot_uid = s.snapshot_uid)
+                            OR (f.snapshot_uid = s.snapshot_id)
+                            OR (f.snapshot_id IS NOT NULL AND f.snapshot_id = s.snapshot_id)
+                        )
+                        WHERE (s.status = 'complete' OR s.status IS NULL)
+                        ORDER BY f.code
+                    """
+                else:
+                    export_sql = f"SELECT code, payload FROM {table} ORDER BY code"
+
                 if "jsonl" in formats:
                     path = self.path / f"{table}.jsonl"
                     tmp = path.with_suffix(".tmp")
                     with tmp.open("w", encoding="utf-8") as stream:
-                        for row in conn.execute(f"SELECT payload FROM {table} ORDER BY code"):
-                            stream.write(row[0] + "\n")
+                        for row in conn.execute(export_sql):
+                            stream.write(row[1] + "\n")
                     tmp.replace(path)
                     outputs.append(path.name)
                 if "parquet" in formats:
@@ -1262,7 +1422,7 @@ class Dataset:
                     path = self.path / f"{table}.parquet"
                     tmp = path.with_suffix(".tmp")
                     with pq.ParquetWriter(tmp, schema) as writer:
-                        cursor = conn.execute(f"SELECT code, payload FROM {table} ORDER BY code")
+                        cursor = conn.execute(export_sql)
                         while batch := cursor.fetchmany(1 if table == "documents" else 1000):
                             writer.write_table(
                                 pa.Table.from_pylist(

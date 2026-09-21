@@ -96,7 +96,7 @@ def parse_hierarchy(raw_doc):
     }
 
 
-def norm_cards(records):
+def norm_cards(records, *, default_source: str = "online_api"):
     """Preserve every publication and every resource value, including non-numeric values."""
     cards = []
     for record in records:
@@ -115,7 +115,7 @@ def norm_cards(records):
         edition_val = clean(raw_edition) if raw_edition else None
         source_url = (
             f"https://fgiscs.minstroyrf.ru/api/NormLegalDocFilePublished/GetByGuid/{doc_guid}"
-            if doc_guid
+            if (doc_guid and default_source == "online_api")
             else None
         )
         source = {
@@ -125,15 +125,15 @@ def norm_cards(records):
             "record_sha256": digest,
         }
         evidence = {
-            "source": "online_api",
-            "source_type": "SearchEstimatedRates",
+            "source": default_source,
+            "source_type": "SearchEstimatedRates" if default_source == "online_api" else default_source,
             "document": clean_doc,
             "document_guid": doc_guid,
             "record_id": rec_id,
             "sha256": digest,
         }
         provenance = {
-            "source": "online_api",
+            "source": default_source,
             "document_guid": doc_guid,
             "source_url": source_url,
             "edition": edition_val,

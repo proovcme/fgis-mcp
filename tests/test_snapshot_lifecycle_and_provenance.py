@@ -54,6 +54,19 @@ SAMPLE_FSBC_XML = b"""<?xml version="1.0" encoding="utf-8"?>
 """
 
 
+SAMPLE_FSBC_MACHINES_XML = SAMPLE_FSBC_XML.replace(b"01.1.01.01-0001", b"91.01.01-0001")
+
+
+def _populate_complete_fsnb_zip(zf: zipfile.ZipFile):
+    zf.writestr("ГЭСН.xml", SAMPLE_NORM_XML)
+    zf.writestr("ГЭСНм.xml", SAMPLE_NORM_XML)
+    zf.writestr("ГЭСНр.xml", SAMPLE_NORM_XML)
+    zf.writestr("ГЭСНп.xml", SAMPLE_NORM_XML)
+    zf.writestr("ГЭСНмр.xml", SAMPLE_NORM_XML)
+    zf.writestr("ФСБЦ_Мат&Оборуд.xml", SAMPLE_FSBC_XML)
+    zf.writestr("ФСБЦ_Маш.xml", SAMPLE_FSBC_MACHINES_XML)
+
+
 def test_date_semantics_separation():
     # 1. Approval decree only -> approval_date present, effective_from is None
     d1 = extract_dates("Приказ Минстроя России от 18.05.2022 № 378/пр")
@@ -279,8 +292,7 @@ def test_safe_reimport_idempotency_returns_existing(config, tmp_path):
     """Verify that importing an identical archive a second time returns the existing snapshot without re-processing."""
     zip_path = tmp_path / "data-20260812-structure-20240216.zip"
     with zipfile.ZipFile(zip_path, "w") as zf:
-        zf.writestr("ГЭСН.xml", SAMPLE_NORM_XML)
-        zf.writestr("ФСБЦ_Мат&Оборуд.xml", SAMPLE_FSBC_XML)
+        _populate_complete_fsnb_zip(zf)
 
     svc = Service(config)
     r1 = svc.import_opendata_archive(str(zip_path))
@@ -306,8 +318,7 @@ def test_failed_same_date_import_isolation(config, tmp_path):
     # 1. Create and import a valid snapshot with date 20260812
     valid_zip = tmp_path / "data-20260812-first.zip"
     with zipfile.ZipFile(valid_zip, "w") as zf:
-        zf.writestr("ГЭСН.xml", SAMPLE_NORM_XML)
-        zf.writestr("ФСБЦ_Мат&Оборуд.xml", SAMPLE_FSBC_XML)
+        _populate_complete_fsnb_zip(zf)
 
     svc = Service(config)
     r1 = svc.import_opendata_archive(str(valid_zip))
@@ -316,7 +327,7 @@ def test_failed_same_date_import_isolation(config, tmp_path):
     assert "20260812" in snap_uid_1
 
     ds = Dataset(config.root, r1["dataset_id"])
-    hist1 = ds.norm_history("01-01-001-01", include_incomplete=False)
+    hist1 = ds.norm_history("01-01-001-01", family="ГЭСН", include_incomplete=False)
     assert hist1["total_editions"] == 1
     assert hist1["editions"][0]["snapshot_provenance"]["snapshot_status"] == "complete"
 
@@ -342,7 +353,7 @@ def test_failed_same_date_import_isolation(config, tmp_path):
     assert snap_failed["snapshot_id"] == "20260812"
 
     # 4. Invariant: earlier complete snapshot norms remain 100% intact and uncorrupted
-    hist_after = ds.norm_history("01-01-001-01", include_incomplete=False)
+    hist_after = ds.norm_history("01-01-001-01", family="ГЭСН", include_incomplete=False)
     assert hist_after["total_editions"] == 1
     assert hist_after["editions"][0]["snapshot_provenance"]["snapshot_status"] == "complete"
     assert hist_after["editions"][0]["snapshot_uid"] == snap_uid_1

@@ -355,12 +355,13 @@ def execute(config, job_id, network=None):
                                             duplicate_norm_ids=duplicate_norm_ids,
                                             duplicate_fsbc_ids=duplicate_fsbc_ids,
                                         )
+                                        proof_status = proof.get("status", "failed")
                                         data.finish_snapshot(
                                             snap_uid,
                                             total_norms=total_norms,
                                             total_fsbc=total_fsbc,
                                             proof=proof,
-                                            status="complete",
+                                            status=proof_status,
                                             approval_date=reader.approval_date,
                                             effective_from=reader.effective_from,
                                         )
@@ -370,6 +371,17 @@ def execute(config, job_id, network=None):
                                         receipt["total_fsbc"] = total_fsbc
                                         receipt["xml_inventory"] = reader.inventory
                                         receipt["proof"] = proof
+                                        receipt["status"] = proof_status
+                                        if proof_status != "complete":
+                                            job["errors"].append(
+                                                {
+                                                    "task": task,
+                                                    "code": "SNAPSHOT_PARTIAL"
+                                                    if proof_status == "partial"
+                                                    else "SNAPSHOT_FAILED",
+                                                    "message": f"Snapshot '{snap_uid}' completeness proof evaluated as {proof_status}",
+                                                }
+                                            )
                                     except Exception as exc:
                                         data.fail_snapshot(snap_uid, error=str(exc))
                                         raise

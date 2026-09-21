@@ -863,14 +863,14 @@ class Service:
             "job": jobs.status(self.config, dataset_id),
         }
 
-    def export(self, dataset_id, formats):
+    def export(self, dataset_id, formats, include_incomplete: bool = False):
         data = Dataset(self.config.root, dataset_id)
         try:
             with FileLock(data.path / "write.lock", timeout=0):
                 job = jobs.load_job(self.config, dataset_id)
                 if job["status"] in {"running", "starting"}:
                     raise ValueError("Wait for the worker to stop before exporting")
-                files = data.export(formats)
+                files = data.export(formats, include_incomplete=include_incomplete)
                 data.manifest(status=job["status"], tasks=job["tasks"], errors=job["errors"])
         except Timeout as exc:
             raise ValueError("Dataset is being written; retry after the job stops") from exc
@@ -1115,18 +1115,19 @@ class Service:
             if row:
                 existing_meta = json.loads(row[4]) if row[4] else {}
                 existing_proof = json.loads(row[5]) if row[5] else existing_meta.get("proof")
-                return {
-                    "dataset_id": dataset_id,
-                    "snapshot_uid": row[0],
-                    "snapshot_id": row[1],
-                    "total_norms": row[2],
-                    "total_fsbc": row[3],
-                    "xml_inventory": existing_meta.get("xml_files", {}),
-                    "sha256": file_sha256,
-                    "status": "complete",
-                    "proof": existing_proof,
-                    "reused_existing": True,
-                }
+                if isinstance(existing_proof, dict) and existing_proof.get("status") == "complete":
+                    return {
+                        "dataset_id": dataset_id,
+                        "snapshot_uid": row[0],
+                        "snapshot_id": row[1],
+                        "total_norms": row[2],
+                        "total_fsbc": row[3],
+                        "xml_inventory": existing_meta.get("xml_files", {}),
+                        "sha256": file_sha256,
+                        "status": "complete",
+                        "proof": existing_proof,
+                        "reused_existing": True,
+                    }
 
         # Copy archive into raw in 1 MiB chunks without loading full file into memory
         raw_rel, h, file_size = data.raw_file(path, "zip")
@@ -1241,13 +1242,14 @@ class Service:
                 duplicate_norm_ids=duplicate_norm_ids,
                 duplicate_fsbc_ids=duplicate_fsbc_ids,
             )
-            # Mark snapshot complete
+            proof_status = proof.get("status", "failed")
+            # Mark snapshot with evaluated status (complete, partial, or failed)
             data.finish_snapshot(
                 snap_uid,
                 total_norms=total_norms,
                 total_fsbc=total_fsbc,
                 proof=proof,
-                status="complete",
+                status=proof_status,
                 approval_date=reader.approval_date,
                 effective_from=reader.effective_from,
             )
@@ -1263,7 +1265,7 @@ class Service:
             "total_fsbc": total_fsbc,
             "xml_inventory": reader.inventory,
             "sha256": h,
-            "status": "complete",
+            "status": proof_status,
             "proof": proof,
         }
 
