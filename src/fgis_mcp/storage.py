@@ -711,7 +711,17 @@ class Dataset:
             "next_offset": offset + limit if offset + limit < len(text) else None,
         }
 
-    def query(self, kind="norms", query="", code="", limit=20, offset=0, zone_id=None, period_id=None):
+    def query(
+        self,
+        kind="norms",
+        query="",
+        code="",
+        limit=20,
+        offset=0,
+        zone_id=None,
+        period_id=None,
+        family=None,
+    ):
         if kind not in {"norms", "prices", "documents", "fsbc"}:
             raise ValueError("kind must be norms, prices, documents or fsbc")
         if not 1 <= limit <= 100 or offset < 0:
@@ -720,6 +730,9 @@ class Dataset:
         if code:
             clauses.append("code=?")
             params.append(code)
+        if family and kind == "norms":
+            clauses.append("family=?")
+            params.append(family)
         if query:
             clauses.append("instr(search_text, ?) > 0")
             params.append(query.casefold())
@@ -750,28 +763,71 @@ class Dataset:
         if kind == "norms":
             q_clean = (query or "").strip().casefold()
             code_clean = (code or "").strip().casefold()
+
+            def _is_provenance_verified(it: dict) -> bool:
+                ev = it.get("evidence")
+                if isinstance(ev, dict) and ev.get("source") in ("opendata", "online_api", "manual_import"):
+                    if (
+                        ev.get("snapshot_uid")
+                        or ev.get("sha256")
+                        or ev.get("archive_sha256")
+                        or ev.get("source_url")
+                    ):
+                        return True
+                sp = it.get("snapshot_provenance")
+                if isinstance(sp, dict) and sp.get("snapshot_status") == "complete":
+                    if sp.get("archive_sha256") or sp.get("xml_sha256") or sp.get("snapshot_uid"):
+                        return True
+                src = it.get("source")
+                if isinstance(src, dict) and (
+                    src.get("snapshot_uid") or src.get("record_sha256") or src.get("document_guid")
+                ):
+                    return True
+                if it.get("snapshot_uid") or it.get("provenance"):
+                    return True
+                return False
+
+            exact_items = []
             for it in items:
                 it_code = it.get("code", "").strip().casefold()
                 it_name = it.get("name", "").strip().casefold()
-                if (code_clean and it_code == code_clean) or (
+                is_exact_match = (code_clean and it_code == code_clean) or (
                     q_clean and (it_code == q_clean or it_name == q_clean)
-                ):
-                    it["match_status"] = "exact"
+                )
+                if is_exact_match:
+                    exact_items.append(it)
+                    if _is_provenance_verified(it):
+                        it["match_status"] = "exact"
+                    else:
+                        it["match_status"] = "unverified"
+                        it["provenance_note"] = (
+                            "Запись найдена в локальной базе, но официальный provenance не подтвержден"
+                        )
                 else:
                     it["match_status"] = "candidate"
+
+            exact_families = {
+                (it.get("family") or "").strip() for it in exact_items if (it.get("family") or "").strip()
+            }
 
             if total == 0:
                 match_status = "not_found"
                 msg = "Прямая норма ФСНБ через FGIS MCP не подтверждена"
+            elif len(exact_families) > 1 and code_clean:
+                match_status = "ambiguous"
+                msg = f"Обнаружено несколько различных нормативных сущностей с данным шифром ({', '.join(sorted(exact_families))}). Уточните family."
+                for it in exact_items:
+                    it["match_status"] = "ambiguous"
             elif any(it.get("match_status") == "exact" for it in items):
                 match_status = (
                     "exact"
                     if code_clean or any(it.get("code", "").strip().casefold() == q_clean for it in items)
                     else "candidate"
                 )
-                msg = (
-                    "Найдено точное совпадение нормы" if match_status == "exact" else "Найдены кандидаты норм"
-                )
+                msg = "Найдена точная норма ФСНБ" if match_status == "exact" else "Найдены кандидаты норм"
+            elif any(it.get("match_status") == "unverified" for it in items):
+                match_status = "unverified"
+                msg = "Запись найдена в локальной базе, но официальный provenance не подтвержден"
             else:
                 match_status = "candidate"
                 msg = (
@@ -908,11 +964,43 @@ class Dataset:
                 "available_snapshots": [s.get("snapshot_id") or s.get("snapshot_uid") for s in snapshots],
             }
 
+        if not family and len(by_family) > 1:
+            options = []
+            for fam, fam_records in sorted(by_family.items()):
+                first_rec = fam_records[0]
+                options.append(
+                    {
+                        "family": fam,
+                        "code": code,
+                        "name": first_rec.get("name"),
+                        "unit": first_rec.get("unit"),
+                        "total_editions": len(fam_records),
+                        "snapshots": [r.get("snapshot_id") for r in fam_records if r.get("snapshot_id")],
+                    }
+                )
+            return {
+                "dataset_id": self.id,
+                "code": code,
+                "family": None,
+                "status": "ambiguous",
+                "match_status": "ambiguous",
+                "message": (
+                    f"Обнаружено {len(by_family)} различных семейств норм с данным шифром ({', '.join(sorted(by_family.keys()))}). "
+                    "Уточните запрос, указав family."
+                ),
+                "families_found": list(by_family.keys()),
+                "options": options,
+                "total_editions": 0,
+                "editions": [],
+                "transitions": [],
+            }
+
         return {
             "dataset_id": self.id,
             "code": code,
             "family": family,
             "status": "complete",
+            "match_status": "exact",
             "families_found": list(by_family.keys()),
             "total_editions": len(records),
             "editions": records,
@@ -941,8 +1029,16 @@ class Dataset:
                 params.append(family)
             where = " WHERE " + " AND ".join(clauses)
 
-            query = f"SELECT n.payload, n.snapshot_uid, n.snapshot_id FROM norms n {where}"
+            query = f"SELECT n.payload, n.snapshot_uid, n.snapshot_id, n.family FROM norms n {where}"
             rows = conn.execute(query, params).fetchall()
+
+        if not family:
+            families = {(r[3] or "").strip() for r in rows if (r[3] or "").strip()}
+            if len(families) > 1:
+                raise ValueError(
+                    f"Norm code '{code}' is ambiguous across families ({', '.join(sorted(families))}). "
+                    "Specify family parameter to compare editions of a specific norm."
+                )
 
         editions = []
         for r in rows:

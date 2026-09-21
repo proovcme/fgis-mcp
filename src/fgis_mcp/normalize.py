@@ -141,6 +141,20 @@ def norm_cards(records):
             "record_id": rec_id,
         }
         family = clean(record.get("documentTypeName"))
+        if not family and raw_doc:
+            raw_upper = str(raw_doc).upper()
+            if "ГЭСНМ" in raw_upper:
+                family = "ГЭСНм"
+            elif "ГЭСНР" in raw_upper:
+                family = "ГЭСНр"
+            elif "ГЭСНП" in raw_upper:
+                family = "ГЭСНп"
+            elif "ГЭСН" in raw_upper:
+                family = "ГЭСН"
+            elif "ФЕРМ" in raw_upper:
+                family = "ФЕРм"
+            elif "ФЕР" in raw_upper:
+                family = "ФЕР"
         by_code = {}
         for col in columns:
             code = code_text(col.get("number") or col.get("Number"))

@@ -1,6 +1,8 @@
 import asyncio
 import json
 
+import pytest
+
 from fgis_mcp.errors import (
     AmbiguousSnapshotError,
     LocalDatasetIncompleteError,
@@ -515,3 +517,234 @@ def test_17_read_norm_and_read_document_separation_contract(config):
     assert "read the specific norm" in instr
     assert "fgis_read_norm" in instr
     assert "fgis_read_document" in instr
+
+
+def test_18_read_norm_filters_code_collision_by_family_and_document(config, monkeypatch):
+    from fgis_mcp.service import Service
+
+    svc = Service(config)
+    records = [
+        {
+            "id": 1,
+            "documentName": "Сборник 17. Оборудование<br/>Таблица ГЭСНм 17-01-001 Баки",
+            "documentTypeName": "ГЭСНм",
+            "normLegalDocPublishedGuid": "guid-m",
+            "normTableJson": [{"number": "17-01-001-01", "name": "Бак", "meterName": "шт"}],
+            "normCatalogWorkTableJson": [],
+            "normTableValueTableJson": [],
+        },
+        {
+            "id": 2,
+            "documentName": "Сборник 17. Водопровод<br/>Таблица ГЭСН 17-01-001 Ванны",
+            "documentTypeName": "ГЭСН",
+            "normLegalDocPublishedGuid": "guid-c",
+            "normTableJson": [{"number": "17-01-001-01", "name": "Ванна", "meterName": "10 компл"}],
+            "normCatalogWorkTableJson": [],
+            "normTableValueTableJson": [],
+        },
+    ]
+    meta = {"source_url": "https://test", "sha256": "collision"}
+    monkeypatch.setattr(svc.network, "get_json", lambda path, params=None: (records, 200, meta))
+
+    by_family = svc.read_norm("17-01-001-01", family="ГЭСН")
+    assert by_family["name"] == "Ванна"
+    assert by_family["total_editions"] == 1
+
+    by_document = svc.read_norm("17-01-001-01", document_guid="guid-c")
+    assert by_document["name"] == "Ванна"
+    assert by_document["document_guid"] == "guid-c"
+
+
+def test_19_read_norm_collision_without_family_returns_ambiguous(config, monkeypatch):
+    from fgis_mcp.service import Service
+
+    svc = Service(config)
+    records = [
+        {
+            "id": 1,
+            "documentName": "Сборник 17. Оборудование<br/>Таблица ГЭСНм 17-01-001 Баки",
+            "documentTypeName": "ГЭСНм",
+            "normLegalDocPublishedGuid": "guid-m",
+            "normTableJson": [{"number": "17-01-001-01", "name": "Бак", "meterName": "шт"}],
+            "normCatalogWorkTableJson": [],
+            "normTableValueTableJson": [],
+        },
+        {
+            "id": 2,
+            "documentName": "Сборник 17. Водопровод<br/>Таблица ГЭСН 17-01-001 Ванны",
+            "documentTypeName": "ГЭСН",
+            "normLegalDocPublishedGuid": "guid-c",
+            "normTableJson": [{"number": "17-01-001-01", "name": "Ванна", "meterName": "10 компл"}],
+            "normCatalogWorkTableJson": [],
+            "normTableValueTableJson": [],
+        },
+    ]
+    meta = {"source_url": "https://test", "sha256": "collision"}
+    monkeypatch.setattr(svc.network, "get_json", lambda path, params=None: (records, 200, meta))
+
+    res = svc.read_norm("17-01-001-01")
+    assert res["match_status"] == "ambiguous"
+    assert res["primary"] is None
+    assert res["name"] is None
+    assert res["unit"] is None
+    assert res["resources"] == []
+    assert res["work_steps"] == []
+    assert res["options"] is not None
+    assert len(res["options"]) == 2
+    fams = sorted([o["family"] for o in res["options"]])
+    assert fams == ["ГЭСН", "ГЭСНм"]
+    assert "уточните" in res["message"].lower() or "family" in res["message"].lower()
+
+
+def test_20_read_norm_same_family_multiple_editions_exact_with_diff(config, monkeypatch):
+    from fgis_mcp.service import Service
+
+    svc = Service(config)
+    records = [
+        {
+            "id": 1,
+            "documentName": "Сборник 17. Водопровод<br/>Таблица ГЭСН 17-01-001 Ванны",
+            "documentTypeName": "ГЭСН",
+            "normLegalDocPublishedGuid": "guid-ed1",
+            "normTableJson": [{"number": "17-01-001-01", "name": "Ванна", "meterName": "10 компл"}],
+            "normCatalogWorkTableJson": [],
+            "normTableValueTableJson": [
+                {
+                    "NormTablePartId": 1,
+                    "NormTablePartParentId": None,
+                    "Cipher": "01.1.01.01-0001",
+                    "Name": "Дюбель",
+                    "UnitName": "шт",
+                    "NormTablePartNormValueList": [{"NormNumber": "17-01-001-01", "Value": "10.0"}],
+                }
+            ],
+        },
+        {
+            "id": 2,
+            "documentName": "Сборник 17. Водопровод<br/>Таблица ГЭСН 17-01-001 Ванны",
+            "documentTypeName": "ГЭСН",
+            "normLegalDocPublishedGuid": "guid-ed2",
+            "normTableJson": [{"number": "17-01-001-01", "name": "Ванна", "meterName": "10 компл"}],
+            "normCatalogWorkTableJson": [],
+            "normTableValueTableJson": [
+                {
+                    "NormTablePartId": 1,
+                    "NormTablePartParentId": None,
+                    "Cipher": "01.1.01.01-0001",
+                    "Name": "Дюбель",
+                    "UnitName": "шт",
+                    "NormTablePartNormValueList": [{"NormNumber": "17-01-001-01", "Value": "12.0"}],
+                }
+            ],
+        },
+    ]
+    meta = {"source_url": "https://test", "sha256": "two_editions"}
+    monkeypatch.setattr(svc.network, "get_json", lambda path, params=None: (records, 200, meta))
+
+    res = svc.read_norm("17-01-001-01")
+    assert res["match_status"] == "exact"
+    assert res["name"] == "Ванна"
+    assert res["family"] == "ГЭСН"
+    assert res["has_multiple_editions"] is True
+    assert res["total_editions"] == 2
+    assert res["options"] is None
+    assert res["editions_differences"] is not None
+    assert len(res["editions_differences"]) == 1
+
+
+def test_21_compare_norms_collision_guards_against_cross_family(config, monkeypatch):
+    from fgis_mcp.service import Service
+
+    svc = Service(config)
+    records = [
+        {
+            "id": 1,
+            "documentName": "Сборник 17. Оборудование<br/>Таблица ГЭСНм 17-01-001 Баки",
+            "documentTypeName": "ГЭСНм",
+            "normLegalDocPublishedGuid": "guid-m",
+            "normTableJson": [{"number": "17-01-001-01", "name": "Бак", "meterName": "шт"}],
+            "normCatalogWorkTableJson": [],
+            "normTableValueTableJson": [],
+        },
+        {
+            "id": 2,
+            "documentName": "Сборник 17. Водопровод<br/>Таблица ГЭСН 17-01-001 Ванны",
+            "documentTypeName": "ГЭСН",
+            "normLegalDocPublishedGuid": "guid-c",
+            "normTableJson": [{"number": "17-01-001-01", "name": "Ванна", "meterName": "10 компл"}],
+            "normCatalogWorkTableJson": [],
+            "normTableValueTableJson": [],
+        },
+    ]
+    meta = {"source_url": "https://test", "sha256": "collision"}
+    monkeypatch.setattr(svc.network, "get_json", lambda path, params=None: (records, 200, meta))
+
+    with pytest.raises(ValueError, match="ambiguous"):
+        svc.compare_norms("17-01-001-01")
+
+    res = svc.compare_norms("17-01-001-01", family="ГЭСН")
+    assert res["has_differences"] is False
+    assert "Only one edition" in res["note"]
+
+
+def test_22_dataset_query_and_history_handles_ambiguity_and_provenance(tmp_path):
+    from fgis_mcp.storage import Dataset
+
+    ds = Dataset(tmp_path, "a" * 32, create=True)
+    card_gesn = {
+        "norm_id": "snap1:ГЭСН:17-01-001-01",
+        "code": "17-01-001-01",
+        "family": "ГЭСН",
+        "name": "Ванна купальная",
+        "unit": "10 компл",
+        "snapshot_uid": "snap1",
+        "snapshot_id": "20260101",
+        "work_steps": [],
+        "resources": [],
+        "evidence": {
+            "source": "opendata",
+            "source_type": "fsnb_xml",
+            "snapshot_uid": "snap1",
+        },
+    }
+    card_gesnm = {
+        "norm_id": "snap1:ГЭСНм:17-01-001-01",
+        "code": "17-01-001-01",
+        "family": "ГЭСНм",
+        "name": "Бак прямоугольный",
+        "unit": "шт",
+        "snapshot_uid": "snap1",
+        "snapshot_id": "20260101",
+        "work_steps": [],
+        "resources": [],
+        "evidence": {
+            "source": "opendata",
+            "source_type": "fsnb_xml",
+            "snapshot_uid": "snap1",
+        },
+    }
+    receipt = {"sha256": "test_sha", "request": {"kind": "test"}}
+    ds.add_norms("task_test", [card_gesn, card_gesnm], receipt)
+
+    # Query by code alone when multiple families exist -> ambiguous
+    res = ds.query(kind="norms", code="17-01-001-01")
+    assert res["match_status"] == "ambiguous"
+    assert res["total"] == 2
+
+    # Query by code with family -> exact
+    res_fam = ds.query(kind="norms", code="17-01-001-01", family="ГЭСН")
+    assert res_fam["match_status"] == "exact"
+    assert res_fam["total"] == 1
+    assert res_fam["items"][0]["family"] == "ГЭСН"
+
+    # Norm history by code alone -> ambiguous with options
+    hist = ds.norm_history("17-01-001-01")
+    assert hist["status"] == "ambiguous"
+    assert hist["match_status"] == "ambiguous"
+    assert len(hist["options"]) == 2
+
+    # Norm history with family -> exact / complete
+    hist_fam = ds.norm_history("17-01-001-01", family="ГЭСН")
+    assert hist_fam["status"] == "complete"
+    assert hist_fam["match_status"] == "exact"
+    assert hist_fam["total_editions"] == 1
