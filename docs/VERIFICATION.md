@@ -7,9 +7,11 @@
 
 | Проверка | Результат |
 |---|---|
-| Автотесты | `163 passed, 6 deselected` на Windows, Python 3.13.12 |
+| Автотесты | `164 passed, 6 deselected` на Windows, Python 3.13.12 |
 | Статический контроль | `ruff check src tests scripts` без замечаний |
 | MCP discovery | 31 инструмент, включая пакетный поиск/чтение, историю норм и OpenData |
+| Ошибки на границе MCP | `NETWORK_ERROR` и `LOCAL_DATASET_INCOMPLETE` возвращаются структурированно с `error_code` и `retryable`, без `UnexpectedToolError` |
+| Живые evidence-сценарии direct | `3 passed, 3 skipped`: три проверки не выполнялись из-за структурированного `NETWORK_ERROR`; недоступность внешнего ФГИС не засчитана как дефект семантики MCP |
 | CI изменений снимков | Linux, Windows и macOS; Python 3.11 и 3.13 — успешно |
 | Живой запрос ФГИС | Для `06-08-001-01` строгий фильтр публикации `39a7e78c-ad13-45e9-b21c-dec131bbf971` корректно вернул `not_found_in_requested_publication` и фактическую карточку публикации `72df4e20-9b5e-412a-b4c6-1ac9749000b5`, запись `421255` |
 

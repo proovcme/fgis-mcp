@@ -1,9 +1,28 @@
+import functools
+
 from mcp.server import MCPServer
 from mcp.types import ToolAnnotations
 
 from . import __version__, catalogs, jobs
+from .errors import FgisError
 from .service import Service
 from .storage import Dataset, dump
+
+RETRYABLE_ERROR_CODES = {"NETWORK_ERROR", "TIMEOUT", "TOO_MANY_REQUESTS", "SERVICE_UNAVAILABLE"}
+
+
+def tool_error_payload(exc: FgisError) -> dict:
+    """Convert an expected operational failure into a stable MCP payload."""
+    return {
+        "status": exc.code,
+        "error_code": exc.code,
+        "error": exc.message,
+        "message": exc.message,
+        "http_status": exc.status,
+        "retryable": exc.code in RETRYABLE_ERROR_CODES
+        or exc.status == 429
+        or (exc.status is not None and 500 <= exc.status <= 599),
+    }
 
 
 def create_server(config):
@@ -26,19 +45,33 @@ def create_server(config):
             "10. Absence in local dataset does NOT mean absence in FGIS CS; distinguish local dataset gaps from absence in FGIS. "
             "11. If evidence is insufficient, explicitly state the limitation (UNRESOLVED_CONDITION or UNSUPPORTED_BY_FGIS_MCP). "
             "12. For coefficients: fgis_extract_coefficients requires a known document_guid and/or table_index; it does not accept a text query argument. "
-            "13. Region -> zone -> period IDs come from fgis_catalog. Downloads return durable job IDs; poll fgis_job_status. A complete job means requested tasks succeeded, not that the whole FSNB is complete."
+            "13. Region -> zone -> period IDs come from fgis_catalog. Downloads return durable job IDs; poll fgis_job_status. A complete job means requested tasks succeeded, not that the whole FSNB is complete. "
+            "14. Every tool result may contain error_code. Treat NETWORK_ERROR as an unavailable source, not as not_found, and retry only when retryable=true."
         ),
     )
     read = ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=True)
     local = ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=False)
     write = ToolAnnotations(readOnlyHint=False, destructiveHint=False, openWorldHint=True)
 
-    @server.tool(annotations=read)
+    def safe_tool(*, annotations):
+        def register(fn):
+            @functools.wraps(fn)
+            def guarded(*args, **kwargs):
+                try:
+                    return fn(*args, **kwargs)
+                except FgisError as exc:
+                    return tool_error_payload(exc)
+
+            return server.tool(annotations=annotations)(guarded)
+
+        return register
+
+    @safe_tool(annotations=read)
     def fgis_sources() -> dict:
         """Available catalogues: FSNB, FER, TER registry, methodologies/coefficients, prices, archives and limits."""
         return catalogs.inventory()
 
-    @server.tool(annotations=read)
+    @safe_tool(annotations=read)
     def fgis_browse_source(
         source: str,
         parent: str | None = None,
@@ -59,17 +92,17 @@ def create_server(config):
             service.network, source, parent, level, archive, section, page, limit, offset, source_params
         )
 
-    @server.tool(annotations=read)
+    @safe_tool(annotations=read)
     def fgis_diagnose() -> dict:
         """Check FGIS API JSON via configured route; explain proxy vs full-tunnel VPN limitations."""
         return service.network.diagnose()
 
-    @server.tool(annotations=read)
+    @safe_tool(annotations=read)
     def fgis_catalog(kind: str = "regions", parent_id: int | None = None) -> dict:
         """List price regions; zones with region parent_id; periods with zone parent_id."""
         return service.catalog(kind, parent_id)
 
-    @server.tool(annotations=read)
+    @safe_tool(annotations=read)
     def fgis_search_norms(
         query: str,
         limit: int = 20,
@@ -83,7 +116,7 @@ def create_server(config):
         """
         return service.online(query, limit, offset, family=family)
 
-    @server.tool(annotations=read)
+    @safe_tool(annotations=read)
     def fgis_read_norm(
         code: str,
         limit: int = 20,
@@ -105,7 +138,7 @@ def create_server(config):
         """
         return service.read_norm(code, family=family, document_guid=document_guid)
 
-    @server.tool(annotations=read)
+    @safe_tool(annotations=read)
     def fgis_batch_search_norms(
         items: list[dict],
     ) -> dict:
@@ -118,7 +151,7 @@ def create_server(config):
         """
         return service.batch_search_norms(items)
 
-    @server.tool(annotations=read)
+    @safe_tool(annotations=read)
     def fgis_batch_read_norms(
         items: list[dict],
         detail_level: str = "compact",
@@ -135,7 +168,7 @@ def create_server(config):
         """
         return service.batch_read_norms(items, detail_level=detail_level)
 
-    @server.tool(annotations=read)
+    @safe_tool(annotations=read)
     def fgis_read_document(
         document_guid: str | None = None,
         source: str = "normative",
@@ -155,7 +188,7 @@ def create_server(config):
         """
         return service.documents.read(document_guid, source, offset, limit, expected_sha256, refresh)
 
-    @server.tool(annotations=read)
+    @safe_tool(annotations=read)
     def fgis_search_document(
         query: str,
         document_guid: str | None = None,
@@ -173,7 +206,7 @@ def create_server(config):
         """
         return service.documents.search(query, document_guid, source, offset, limit, context, expected_sha256)
 
-    @server.tool(annotations=read)
+    @safe_tool(annotations=read)
     def fgis_document_outline(
         document_guid: str | None = None,
         source: str = "normative",
@@ -187,7 +220,7 @@ def create_server(config):
         """
         return service.documents.outline(document_guid, source, offset, limit, expected_sha256)
 
-    @server.tool(annotations=read)
+    @safe_tool(annotations=read)
     def fgis_read_document_table(
         table_index: int,
         document_guid: str | None = None,
@@ -207,7 +240,7 @@ def create_server(config):
             table_index, document_guid, source, row_offset, limit, expected_sha256, cell_offset, cell_limit
         )
 
-    @server.tool(annotations=write)
+    @safe_tool(annotations=write)
     def fgis_start_download(
         queries: list[str] | None = None,
         collections: list[int] | None = None,
@@ -248,39 +281,39 @@ def create_server(config):
             max_tasks=max_tasks,
         )
 
-    @server.tool(annotations=local)
+    @safe_tool(annotations=local)
     def fgis_job_status(job_id: str) -> dict:
         """Read progress, failed tasks and interruption state of a background download."""
         return jobs.status(config, job_id)
 
-    @server.tool(annotations=write)
+    @safe_tool(annotations=write)
     def fgis_cancel_job(job_id: str) -> dict:
         """Request cooperative cancellation after the current request/import; preserve downloaded data."""
         return jobs.cancel(config, job_id)
 
-    @server.tool(annotations=write)
+    @safe_tool(annotations=write)
     def fgis_resume_job(job_id: str, max_tasks: int | None = None) -> dict:
         """Resume a stopped/partial job, verify saved source hashes, retry uncommitted tasks."""
         return jobs.launch(config, job_id, max_tasks)
 
-    @server.tool(annotations=local)
+    @safe_tool(annotations=local)
     def fgis_read_dataset_document(
         dataset_id: str, document_id: str, offset: int = 0, limit: int = 12000
     ) -> dict:
         """Read saved complete source JSON/technical parts in bounded character pages; no network."""
         return Dataset(config.root, dataset_id).read_document(document_id, offset, limit)
 
-    @server.tool(annotations=local)
+    @safe_tool(annotations=local)
     def fgis_list_datasets(limit: int = 20, offset: int = 0) -> dict:
         """List locally stored datasets without contacting FGIS."""
         return service.datasets(limit, offset)
 
-    @server.tool(annotations=local)
+    @safe_tool(annotations=local)
     def fgis_dataset_info(dataset_id: str) -> dict:
         """Read dataset counts, coverage, manifest and local artifact paths."""
         return service.dataset_info(dataset_id)
 
-    @server.tool(annotations=local)
+    @safe_tool(annotations=local)
     def fgis_query_dataset(
         dataset_id: str,
         kind: str = "norms",
@@ -313,7 +346,7 @@ def create_server(config):
             include_incomplete=include_incomplete,
         )
 
-    @server.tool(annotations=write)
+    @safe_tool(annotations=write)
     def fgis_export_dataset(
         dataset_id: str,
         formats: list[str] | None = None,
@@ -326,7 +359,7 @@ def create_server(config):
             include_incomplete=include_incomplete,
         )
 
-    @server.tool(annotations=read)
+    @safe_tool(annotations=read)
     def fgis_compare_norms(
         code: str,
         edition_a: str | None = None,
@@ -348,7 +381,7 @@ def create_server(config):
             document_guid=document_guid,
         )
 
-    @server.tool(annotations=read)
+    @safe_tool(annotations=read)
     def fgis_extract_coefficients(
         document_guid: str | None = None,
         source: str = "normative",
@@ -361,7 +394,7 @@ def create_server(config):
         """
         return service.extract_coefficients(document_guid, source, table_index)
 
-    @server.tool(annotations=read)
+    @safe_tool(annotations=read)
     def fgis_price_history(
         code: str,
         dataset_id: str | None = None,
@@ -382,12 +415,12 @@ def create_server(config):
         """
         return service.price_history(code, dataset_id, zone_id, include_incomplete=include_incomplete)
 
-    @server.tool(annotations=local)
+    @safe_tool(annotations=local)
     def fgis_verify_dataset(dataset_id: str) -> dict:
         """Strictly audit dataset completeness: verify totalCount proofs, task integrity, coverage matrix."""
         return service.verify_dataset(dataset_id)
 
-    @server.tool(annotations=write)
+    @safe_tool(annotations=write)
     def fgis_import_manual_file(
         dataset_id: str,
         file_path: str,
@@ -398,7 +431,7 @@ def create_server(config):
         """Import manually downloaded official TER or archive file into a dataset with SHA-256 provenance."""
         return service.import_manual_file(dataset_id, file_path, source, edition, note)
 
-    @server.tool(annotations=read)
+    @safe_tool(annotations=read)
     def fgis_norm_history(
         code: str,
         dataset_id: str | None = None,
@@ -410,7 +443,7 @@ def create_server(config):
         """
         return service.norm_history(code, dataset_id, family=family, include_incomplete=include_incomplete)
 
-    @server.tool(annotations=read)
+    @safe_tool(annotations=read)
     def fgis_compare_snapshots(
         snapshot_a: str,
         snapshot_b: str,
@@ -423,7 +456,7 @@ def create_server(config):
             snapshot_a, snapshot_b, dataset_id, family, include_incomplete=include_incomplete
         )
 
-    @server.tool(annotations=write)
+    @safe_tool(annotations=write)
     def fgis_import_opendata(
         archive_path: str,
         dataset_id: str | None = None,
@@ -432,12 +465,12 @@ def create_server(config):
         """Import an official OpenData FSNB/FSBC ZIP distribution archive with streaming XML parsing."""
         return service.import_opendata_archive(archive_path, dataset_id, snapshot_id)
 
-    @server.tool(annotations=read)
+    @safe_tool(annotations=read)
     def fgis_opendata_list() -> dict:
         """List official OpenData datasets and passports (FSNB-2022, FSNB-2020 / FER)."""
         return service.opendata_list()
 
-    @server.tool(annotations=read)
+    @safe_tool(annotations=read)
     def fgis_opendata_get(dataset_number: str) -> dict:
         """Fetch official OpenData passport metadata, versions, and file distributions."""
         return service.opendata_get(dataset_number)

@@ -19,6 +19,16 @@ import pytest
 from mcp import Client
 from mcp.client.stdio import StdioServerParameters
 
+RETRYABLE_SOURCE_ERRORS = {"NETWORK_ERROR", "TIMEOUT", "TOO_MANY_REQUESTS", "SERVICE_UNAVAILABLE"}
+
+
+def live_payload(result):
+    assert not result.is_error
+    data = json.loads(result.content[0].text)
+    if data.get("error_code") in RETRYABLE_SOURCE_ERRORS and data.get("retryable"):
+        pytest.skip(f"FGIS source unavailable: {data['error_code']}")
+    return data
+
 
 def get_client_params():
     data_dir = ".local/live_regression_test"
@@ -42,7 +52,7 @@ def test_scenario_a_server_rack_42u():
         async with Client(params) as client:
             result = await client.call_tool("fgis_search_norms", {"query": "шкаф серверный 42U"})
             assert not result.is_error
-            data = json.loads(result.content[0].text)
+            data = live_payload(result)
             assert data["match_status"] == "not_found"
             assert data["total"] == 0
             assert "не подтверждена" in data["message"]
@@ -61,7 +71,7 @@ def test_scenario_b_switch_cabinet_reality():
         async with Client(params) as client:
             result = await client.call_tool("fgis_read_norm", {"code": "10-04-067-04"})
             assert not result.is_error
-            data = json.loads(result.content[0].text)
+            data = live_payload(result)
             assert data["code"] == "10-04-067-04"
             assert data["name"] == "Шкаф коммутаторов"
             assert data["unit"] == "шт"
@@ -88,7 +98,7 @@ def test_scenario_c_coefficient_1_15_applicability():
             # 1. Call fgis_read_norm to obtain norm details and extract document_guid dynamically
             norm_res = await client.call_tool("fgis_read_norm", {"code": "10-04-067-04"})
             assert not norm_res.is_error
-            norm_data = json.loads(norm_res.content[0].text)
+            norm_data = live_payload(norm_res)
             assert norm_data["code"] == "10-04-067-04"
             assert norm_data["name"] == "Шкаф коммутаторов"
             assert norm_data["unit"] == "шт"
@@ -111,7 +121,7 @@ def test_scenario_c_coefficient_1_15_applicability():
                 "fgis_search_document", {"query": "1,15", "document_guid": doc_guid}
             )
             assert not search_res.is_error
-            search_data = json.loads(search_res.content[0].text)
+            search_data = live_payload(search_res)
             excerpts = [m.get("excerpt", "") for m in search_data.get("matches", [])]
             for excerpt in excerpts:
                 assert "10-04-067" not in excerpt
@@ -132,7 +142,7 @@ def test_scenario_d_utp_cable_in_tray():
             # 1. Search for cable laying norms
             res = await client.call_tool("fgis_search_norms", {"query": "прокладка кабеля", "limit": 5})
             assert not res.is_error
-            data = json.loads(res.content[0].text)
+            data = live_payload(res)
             assert data["match_status"] == "candidate"
             assert data["total"] > 0
             candidates = data.get("items", [])
@@ -145,7 +155,7 @@ def test_scenario_d_utp_cable_in_tray():
 
                 read_res = await client.call_tool("fgis_read_norm", {"code": code})
                 assert not read_res.is_error, f"Failed to read candidate norm {code}"
-                card = json.loads(read_res.content[0].text)
+                card = live_payload(read_res)
 
                 # Verify grounded fields from compact MCP norm card
                 assert card["code"] == code
@@ -169,7 +179,7 @@ def test_scenario_e_norm_history_changes():
         async with Client(params) as client:
             res = await client.call_tool("fgis_norm_history", {"code": "01-01-001-01"})
             assert not res.is_error
-            data = json.loads(res.content[0].text)
+            data = live_payload(res)
             assert data["status"] in ("complete", "LOCAL_DATASET_INCOMPLETE")
             if data["status"] == "complete":
                 assert data["total_editions"] >= 1
@@ -240,14 +250,14 @@ def test_vor_section_5_mcp_workflow():
                 "fgis_search_norms", {"query": "монтаж металлоконструкций ствола"}
             )
             assert not search_res.is_error
-            search_data = json.loads(search_res.content[0].text)
+            search_data = live_payload(search_res)
             assert search_data["match_status"] == "not_found"
             assert search_data["total"] == 0
 
             # 2. Search for related terms returns candidate norms
             kw_res = await client.call_tool("fgis_search_norms", {"query": "ствол", "limit": 5})
             assert not kw_res.is_error
-            kw_data = json.loads(kw_res.content[0].text)
+            kw_data = live_payload(kw_res)
             assert kw_data["match_status"] == "candidate"
             items = kw_data.get("items", [])
             assert len(items) > 0
@@ -259,7 +269,7 @@ def test_vor_section_5_mcp_workflow():
 
                 read_res = await client.call_tool("fgis_read_norm", {"code": code})
                 assert not read_res.is_error
-                card = json.loads(read_res.content[0].text)
+                card = live_payload(read_res)
 
                 # 4. Norm card must contain all required factual fields
                 assert card["code"] == code
