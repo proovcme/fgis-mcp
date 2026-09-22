@@ -99,6 +99,43 @@ def test_online_document_calls_over_mcp_without_dataset(config, monkeypatch):
     asyncio.run(run())
 
 
+def test_operational_failures_are_structured_at_mcp_boundary(config, monkeypatch):
+    from fgis_mcp.network import SourceError
+    from fgis_mcp.server import create_server
+
+    class Network:
+        def __init__(self, config):
+            pass
+
+        def get_json(self, path, params=None):
+            raise SourceError("NETWORK_ERROR", "FGIS connection failed (TimeoutError)")
+
+    monkeypatch.setattr("fgis_mcp.service.Network", Network)
+
+    async def run():
+        async with Client(create_server(config)) as client:
+            network_result = await client.call_tool("fgis_search_norms", {"query": "кабель"})
+            assert not network_result.is_error
+            network_data = json.loads(network_result.content[0].text)
+            assert network_data == {
+                "status": "NETWORK_ERROR",
+                "error_code": "NETWORK_ERROR",
+                "error": "FGIS connection failed (TimeoutError)",
+                "message": "FGIS connection failed (TimeoutError)",
+                "http_status": None,
+                "retryable": True,
+            }
+
+            history_result = await client.call_tool("fgis_norm_history", {"code": "01-01-001-01"})
+            assert not history_result.is_error
+            history_data = json.loads(history_result.content[0].text)
+            assert history_data["status"] == "LOCAL_DATASET_INCOMPLETE"
+            assert history_data["error_code"] == "LOCAL_DATASET_INCOMPLETE"
+            assert history_data["retryable"] is False
+
+    asyncio.run(run())
+
+
 def test_http_discovery_and_bearer_guard(tmp_path):
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
