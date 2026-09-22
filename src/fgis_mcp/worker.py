@@ -8,10 +8,17 @@ from filelock import FileLock
 
 from . import catalogs, price_catalogs
 from .config import Config
+from .errors import FgisError
 from .jobs import job_path
 from .network import Network, SourceError
 from .normalize import norm_cards, price_rows
-from .storage import Dataset, now, write_json
+from .storage import (
+    Dataset,
+    build_snapshot_uid,
+    check_snapshot_import_preconditions,
+    now,
+    write_json,
+)
 
 
 def execute(config, job_id, network=None):
@@ -222,58 +229,52 @@ def execute(config, job_id, network=None):
                                     rel_path = rel_path.replace("/api/", "")
                                 body, meta = network.fetch(rel_path, file=True)
                                 suffix = (task.get("format") or "bin").lower()
-                                raw_rel = data.raw(body, suffix)
-                                receipt = {
-                                    **meta,
-                                    "fetched_at": now(),
-                                    "request": task,
-                                    "raw_file": raw_rel,
-                                }
                                 is_fsnb_zip = suffix == "zip" or body.startswith(b"PK\x03\x04")
                                 if is_fsnb_zip:
-                                    zip_path = data.path / raw_rel
                                     archive_sha = meta["sha256"]
                                     dist_guid = task.get("distribution_guid") or task.get("guid")
                                     snapshot_id = task.get("snapshot_id") or opendata_xml.extract_snapshot_id(
                                         task.get("name", "") or file_url
                                     )
                                     ds_num = task.get("dataset_number", "7707082071-fsnb")
+                                    snap_uid = build_snapshot_uid(
+                                        ds_num,
+                                        distribution_guid=dist_guid,
+                                        snapshot_id=snapshot_id,
+                                        archive_sha256=archive_sha,
+                                    )
 
-                                    # Check safe re-import strictly scoped to dataset_number
-                                    with data.connect() as conn:
-                                        existing = conn.execute(
-                                            """SELECT snapshot_uid, snapshot_id, total_norms, total_fsbc, proof
-                                            FROM snapshots
-                                            WHERE dataset_number=? AND (archive_sha256=? OR sha256=?) AND status='complete'""",
-                                            (ds_num, archive_sha, archive_sha),
-                                        ).fetchone()
-                                        if existing:
-                                            receipt["snapshot_uid"] = existing[0]
-                                            receipt["snapshot_id"] = existing[1]
-                                            receipt["total_norms"] = existing[2]
-                                            receipt["total_fsbc"] = existing[3]
-                                            receipt["proof"] = json.loads(existing[4]) if existing[4] else {}
-                                            data.add_document(
-                                                key,
-                                                {
-                                                    "name": task.get("name")
-                                                    or task.get("dataset_number", "opendata"),
-                                                    "kind": "opendata_archive",
-                                                    "snapshot_uid": existing[0],
-                                                    "snapshot_id": existing[1],
-                                                },
-                                                receipt,
-                                            )
-                                            continue
+                                    # Check preconditions BEFORE writing raw files or mutating DB
+                                    reused, existing_info = check_snapshot_import_preconditions(
+                                        data,
+                                        snapshot_uid=snap_uid,
+                                        archive_sha256=archive_sha,
+                                        dataset_number=ds_num,
+                                    )
+                                    if reused and existing_info:
+                                        # Snapshot already complete and immutable: reuse without any writes
+                                        job["completed"] += 1
+                                        job["updated_at"] = now()
+                                        continue
+
+                                    # Persist raw archive only after precondition checks pass
+                                    raw_rel = data.raw(body, suffix)
+                                    zip_path = data.path / raw_rel
+                                    receipt = {
+                                        **meta,
+                                        "fetched_at": now(),
+                                        "request": task,
+                                        "raw_file": raw_rel,
+                                    }
 
                                     reader = opendata_xml.FsnbArchiveReader(
                                         zip_path,
                                         snapshot_id=snapshot_id,
+                                        snapshot_uid=snap_uid,
                                         distribution_guid=dist_guid,
                                         dataset_number=ds_num,
                                         archive_sha256=archive_sha,
                                     )
-                                    snap_uid = reader.snapshot_uid
                                     snapshot_meta = {
                                         "snapshot_uid": snap_uid,
                                         "snapshot_id": snapshot_id,
@@ -355,12 +356,13 @@ def execute(config, job_id, network=None):
                                             duplicate_norm_ids=duplicate_norm_ids,
                                             duplicate_fsbc_ids=duplicate_fsbc_ids,
                                         )
+                                        proof_status = proof.get("status", "failed")
                                         data.finish_snapshot(
                                             snap_uid,
                                             total_norms=total_norms,
                                             total_fsbc=total_fsbc,
                                             proof=proof,
-                                            status="complete",
+                                            status=proof_status,
                                             approval_date=reader.approval_date,
                                             effective_from=reader.effective_from,
                                         )
@@ -370,9 +372,27 @@ def execute(config, job_id, network=None):
                                         receipt["total_fsbc"] = total_fsbc
                                         receipt["xml_inventory"] = reader.inventory
                                         receipt["proof"] = proof
+                                        receipt["status"] = proof_status
+                                        if proof_status != "complete":
+                                            job["errors"].append(
+                                                {
+                                                    "task": task,
+                                                    "code": "SNAPSHOT_PARTIAL"
+                                                    if proof_status == "partial"
+                                                    else "SNAPSHOT_FAILED",
+                                                    "message": f"Snapshot '{snap_uid}' completeness proof evaluated as {proof_status}",
+                                                }
+                                            )
                                     except Exception as exc:
                                         data.fail_snapshot(snap_uid, error=str(exc))
-                                        raise
+                                else:
+                                    raw_rel = data.raw(body, suffix)
+                                    receipt = {
+                                        **meta,
+                                        "fetched_at": now(),
+                                        "request": task,
+                                        "raw_file": raw_rel,
+                                    }
 
                                 data.add_document(
                                     key,
@@ -398,10 +418,10 @@ def execute(config, job_id, network=None):
                         # A failed task stays failed and is eligible for resume; never mark it as empty.
                         error = (
                             exc.as_dict()
-                            if isinstance(exc, SourceError)
+                            if isinstance(exc, FgisError)
                             else {
                                 "code": type(exc).__name__,
-                                "message": "Task failed; retained raw sources can be inspected",
+                                "message": str(exc) or "Task failed; retained raw sources can be inspected",
                             }
                         )
                         job["errors"].append({"task": task, **error})

@@ -73,6 +73,22 @@ def test_6_candidate_does_not_turn_into_exact(tmp_path):
 
 def test_7_exact_result_contains_evidence(tmp_path):
     ds = Dataset(tmp_path, "0" * 32, create=True)
+    ds.register_snapshot(
+        {
+            "snapshot_uid": "snap1",
+            "dataset_number": "7707082071-fsnb",
+            "archive_sha256": "a" * 64,
+            "file_name": "fsnb.zip",
+            "snapshot_id": "20260812",
+        }
+    )
+    ds.finish_snapshot(
+        "snap1",
+        total_norms=1,
+        total_fsbc=0,
+        proof={"status": "complete", "proof": "complete_verified"},
+        status="complete",
+    )
     card = {
         "norm_id": "snap1:ГЭСН:01-01-001-01",
         "code": "01-01-001-01",
@@ -691,6 +707,22 @@ def test_22_dataset_query_and_history_handles_ambiguity_and_provenance(tmp_path)
     from fgis_mcp.storage import Dataset
 
     ds = Dataset(tmp_path, "a" * 32, create=True)
+    ds.register_snapshot(
+        {
+            "snapshot_uid": "snap1",
+            "dataset_number": "7707082071-fsnb",
+            "archive_sha256": "a" * 64,
+            "file_name": "fsnb.zip",
+            "snapshot_id": "20260101",
+        }
+    )
+    ds.finish_snapshot(
+        "snap1",
+        total_norms=2,
+        total_fsbc=0,
+        proof={"status": "complete", "proof": "complete_verified"},
+        status="complete",
+    )
     card_gesn = {
         "norm_id": "snap1:ГЭСН:17-01-001-01",
         "code": "17-01-001-01",

@@ -52,3 +52,11 @@ class UnresolvedConditionError(FgisError):
 class UnsupportedByFgisMcpError(FgisError):
     def __init__(self, message: str = "Fact or operation is unsupported by FGIS MCP evidence"):
         super().__init__("UNSUPPORTED_BY_FGIS_MCP", message)
+
+
+class SnapshotImmutableError(FgisError):
+    def __init__(
+        self,
+        message: str = "Snapshot is complete and immutable; cannot overwrite with modified archive",
+    ):
+        super().__init__("SNAPSHOT_IMMUTABLE", message)

@@ -59,6 +59,9 @@ SAMPLE_FSBC_XML = b"""<?xml version="1.0" encoding="utf-8"?>
 """
 
 
+SAMPLE_FSBC_MACHINES_XML = SAMPLE_FSBC_XML.replace(b"01.1.01.01-0001", b"91.01.01-0001")
+
+
 def _create_minimal_fsnb_zip(dest: Path) -> Path:
     with zipfile.ZipFile(dest, "w") as zf:
         zf.writestr("ГЭСН.xml", SAMPLE_NORM_XML)
@@ -67,7 +70,7 @@ def _create_minimal_fsnb_zip(dest: Path) -> Path:
         zf.writestr("ГЭСНп.xml", SAMPLE_NORM_XML)
         zf.writestr("ГЭСНмр.xml", SAMPLE_NORM_XML)
         zf.writestr("ФСБЦ_Мат&Оборуд.xml", SAMPLE_FSBC_XML)
-        zf.writestr("ФСБЦ_Маш.xml", SAMPLE_FSBC_XML)
+        zf.writestr("ФСБЦ_Маш.xml", SAMPLE_FSBC_MACHINES_XML)
     return dest
 
 

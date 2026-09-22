@@ -286,6 +286,7 @@ def create_server(config):
         zone_id: int | None = None,
         period_id: int | None = None,
         family: str | None = None,
+        include_incomplete: bool = False,
     ) -> dict:
         """Offline norms/prices/documents/fsbc search in a local dataset.
         kind can be 'norms', 'prices', 'documents', or 'fsbc'.
@@ -296,13 +297,29 @@ def create_server(config):
         Documents return summaries; read full content with document tool.
         """
         return Dataset(config.root, dataset_id).query(
-            kind, query, code, limit, offset, zone_id, period_id, family=family
+            kind,
+            query,
+            code,
+            limit,
+            offset,
+            zone_id,
+            period_id,
+            family=family,
+            include_incomplete=include_incomplete,
         )
 
     @server.tool(annotations=write)
-    def fgis_export_dataset(dataset_id: str, formats: list[str] | None = None) -> dict:
+    def fgis_export_dataset(
+        dataset_id: str,
+        formats: list[str] | None = None,
+        include_incomplete: bool = False,
+    ) -> dict:
         """Export stopped dataset to jsonl and/or parquet. SQLite always exists; return files and hashes."""
-        return service.export(dataset_id, formats if formats is not None else ["jsonl", "parquet"])
+        return service.export(
+            dataset_id,
+            formats if formats is not None else ["jsonl", "parquet"],
+            include_incomplete=include_incomplete,
+        )
 
     @server.tool(annotations=read)
     def fgis_compare_norms(
