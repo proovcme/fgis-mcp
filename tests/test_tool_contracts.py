@@ -571,6 +571,51 @@ def test_18_read_norm_filters_code_collision_by_family_and_document(config, monk
     assert by_document["document_guid"] == "guid-c"
 
 
+def test_18a_read_norm_explains_strict_publication_miss(config, monkeypatch):
+    from fgis_mcp.service import Service
+
+    svc = Service(config)
+    records = [
+        {
+            "id": 421255,
+            "documentName": (
+                "Сборник 6. Бетонные и железобетонные конструкции монолитные"
+                "<br/>Таблица ГЭСН 06-08-001 Устройство перегородок"
+            ),
+            "documentTypeName": "ГЭСН",
+            "normLegalDocPublishedGuid": "guid-earlier-publication",
+            "normTableJson": [
+                {
+                    "number": "06-08-001-01",
+                    "name": "Устройство перегородок",
+                    "meterName": "100 м2",
+                }
+            ],
+            "normCatalogWorkTableJson": [],
+            "normTableValueTableJson": [],
+        }
+    ]
+    meta = {"source_url": "https://test", "sha256": "publication-miss"}
+    monkeypatch.setattr(svc.network, "get_json", lambda path, params=None: (records, 200, meta))
+
+    res = svc.read_norm(
+        "06-08-001-01",
+        family="ГЭСН",
+        document_guid="guid-later-delta-publication",
+    )
+
+    assert res["match_status"] == "not_found"
+    assert res["filter_reason"] == "not_found_in_requested_publication"
+    assert res["requested_filters"] == {
+        "family": "ГЭСН",
+        "document_guid": "guid-later-delta-publication",
+    }
+    assert res["available_publications_total"] == 1
+    assert res["available_publications"][0]["document_guid"] == "guid-earlier-publication"
+    assert res["available_publications"][0]["record_id"] == 421255
+    assert "накопительный" in res["message"]
+
+
 def test_19_read_norm_collision_without_family_returns_ambiguous(config, monkeypatch):
     from fgis_mcp.service import Service
 

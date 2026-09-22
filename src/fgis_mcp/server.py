@@ -96,6 +96,9 @@ def create_server(config):
         When the same numeric code exists in different collections/families (e.g. ГЭСН vs ГЭСНм),
         returns match_status='ambiguous' with options. Disambiguate by providing family (e.g. 'ГЭСН', 'ГЭСНм')
         and/or document_guid.
+        document_guid is a strict filter for the publication that contains the norm card, not a selector
+        for the cumulative current FSNB. Unchanged norms may retain an earlier publication GUID.
+        A filtered miss returns filter_reason and available_publications for diagnosis.
         Returns a compact self-contained card without duplicated data.
         Use this tool before claiming what a norm includes, its unit, work steps, resources or technical characteristics.
         Do NOT call fgis_read_document merely to inspect norm resources or work steps — use fgis_read_norm instead.
@@ -122,6 +125,8 @@ def create_server(config):
     ) -> dict:
         """Read and verify multiple exact bare norm cards online in a single bounded batch (1..10 items).
         Each item must contain 'input_id' and 'code', and optionally 'family' and 'document_guid'.
+        document_guid strictly filters the publication containing the card; it is not a cumulative-current
+        FSNB selector. Filtered misses preserve filter_reason and available_publications diagnostics.
         Results are strictly independent: each item returns its own match_status
         ('exact', 'ambiguous', 'not_found', or 'error').
         When ambiguous, returns disambiguation options; when not_found, guards against hallucinated codes.

@@ -86,12 +86,14 @@ class Service:
         q_clean = code.strip()
         records, _, _ = self.network.get_json("FullTextSearch/SearchEstimatedRates", {"search": q_clean})
         cards = norm_cards(records)
-        cards = [card for card in cards if card["code"].casefold() == q_clean.casefold()]
+        exact_code_cards = [card for card in cards if card["code"].casefold() == q_clean.casefold()]
+        cards = exact_code_cards
         if family is not None:
             family_clean = family.strip().casefold()
             if not family_clean:
                 raise ValueError("family must be non-empty when provided")
             cards = [card for card in cards if (card.get("family") or "").casefold() == family_clean]
+        publication_candidates = cards
         if document_guid is not None:
             guid_clean = document_guid.strip().casefold()
             if not guid_clean:
@@ -99,6 +101,59 @@ class Service:
             cards = [card for card in cards if (card.get("document_guid") or "").casefold() == guid_clean]
 
         if not cards:
+            filter_reason = None
+            available_cards: list[dict] = []
+            if document_guid is not None and publication_candidates:
+                filter_reason = "not_found_in_requested_publication"
+                available_cards = publication_candidates
+                message = (
+                    "Норма с таким шифром найдена, но отсутствует в запрошенной публикации. "
+                    "document_guid фильтрует конкретную публикацию карточки, а не накопительный "
+                    "состав действующей ФСНБ: неизмененные нормы могут сохранять GUID более "
+                    "ранней публикации. Повторите чтение без document_guid или используйте GUID "
+                    "из available_publications."
+                )
+            elif family is not None and exact_code_cards:
+                filter_reason = "not_found_in_requested_family"
+                available_cards = exact_code_cards
+                message = (
+                    "Норма с таким шифром найдена, но отсутствует в запрошенном семействе. "
+                    "Повторите чтение без family или выберите семейство из available_publications."
+                )
+            else:
+                message = (
+                    "Прямая норма ФСНБ с заданными фильтрами через FGIS MCP не подтверждена"
+                    if family is not None or document_guid is not None
+                    else "Прямая норма ФСНБ через FGIS MCP не подтверждена"
+                )
+
+            available_publications = []
+            seen_publications = set()
+            for card in available_cards:
+                hierarchy = card.get("hierarchy") or {}
+                source = card.get("source") or {}
+                publication_key = (
+                    card.get("family"),
+                    card.get("document_guid"),
+                    card.get("name"),
+                    card.get("unit"),
+                )
+                if publication_key in seen_publications:
+                    continue
+                seen_publications.add(publication_key)
+                available_publications.append(
+                    {
+                        "code": card.get("code"),
+                        "family": card.get("family"),
+                        "name": card.get("name"),
+                        "unit": card.get("unit"),
+                        "document_guid": card.get("document_guid"),
+                        "collection": hierarchy.get("collection") or source.get("document"),
+                        "record_id": card.get("record_id") or source.get("record_id"),
+                        "provenance": card.get("provenance"),
+                    }
+                )
+
             return {
                 "code": q_clean,
                 "name": None,
@@ -129,11 +184,11 @@ class Service:
                 "primary": None,
                 "options": None,
                 "match_status": "not_found",
-                "message": (
-                    "Прямая норма ФСНБ с заданными фильтрами через FGIS MCP не подтверждена"
-                    if family is not None or document_guid is not None
-                    else "Прямая норма ФСНБ через FGIS MCP не подтверждена"
-                ),
+                "message": message,
+                "requested_filters": {"family": family, "document_guid": document_guid},
+                "filter_reason": filter_reason,
+                "available_publications_total": len(available_publications),
+                "available_publications": available_publications[:20],
             }
 
         # Group cards by entity identity (family, collection, code)
@@ -798,6 +853,10 @@ class Service:
                             "provenance": None,
                             "match_status": match_status,
                             "message": card.get("message"),
+                            "requested_filters": card.get("requested_filters"),
+                            "filter_reason": card.get("filter_reason"),
+                            "available_publications_total": card.get("available_publications_total", 0),
+                            "available_publications": card.get("available_publications", []),
                         }
                 else:
                     return idx, {"input_id": input_id, **card}

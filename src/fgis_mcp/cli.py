@@ -65,6 +65,7 @@ def main():
     parser.add_argument("--id")
     parser.add_argument("--file")
     parser.add_argument("--code")
+    parser.add_argument("--family")
     parser.add_argument("--snapshot")
     parser.add_argument("--edition")
     parser.add_argument("--note")
@@ -141,7 +142,10 @@ def main():
             if not args.code:
                 parser.error("norm-history requires --code <norm_code>")
             result = service.norm_history(
-                args.code, dataset_id=args.id, include_incomplete=args.include_incomplete
+                args.code,
+                dataset_id=args.id,
+                family=args.family,
+                include_incomplete=args.include_incomplete,
             )
         elif args.command == "audit":
             from pathlib import Path
@@ -183,7 +187,11 @@ def main():
         else:
             if not args.id:
                 parser.error("export requires --id")
-            result = service.export(args.id, args.format or ["jsonl", "parquet"])
+            result = service.export(
+                args.id,
+                args.format or ["jsonl", "parquet"],
+                include_incomplete=args.include_incomplete,
+            )
         print(dump(result))
         if args.command == "diagnose" and not result["ok"]:
             raise SystemExit(1)

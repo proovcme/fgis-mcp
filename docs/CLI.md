@@ -41,7 +41,7 @@ fgis-mcp verify --id <dataset_id>
 fgis-mcp import --id <dataset_id> --file /path/to/ter_spb.xlsx --source ter --edition "2026.1"
 
 # Потоковый импорт архива среза OpenData ФСНБ (ZIP) с парсингом норм и ФСБЦ
-fgis-mcp import-opendata --id <dataset_id> --archive /path/to/data-20260812-structure-20240216.zip
+fgis-mcp import-opendata --id <dataset_id> --file /path/to/data-20260812-structure-20240216.zip
 
 # Просмотреть историю редакций нормы и вычисленные диффы
 fgis-mcp norm-history --id <dataset_id> --code 01-01-001-01 --family ГЭСН
@@ -49,6 +49,11 @@ fgis-mcp norm-history --id <dataset_id> --code 01-01-001-01 --family ГЭСН
 # Экспорт датасета в форматы JSONL и Parquet (включая fsbc)
 fgis-mcp export --id <dataset_id> --format jsonl --format parquet
 ```
+
+По умолчанию `norm-history` и `export` исключают снимки со статусом `partial` или `failed`.
+Для диагностического чтения добавьте `--include-incomplete`; такие данные не становятся
+подтверждёнными и возвращаются как `unverified`. Если шифр встречается в нескольких семействах,
+передайте `--family ГЭСН` (или другое фактическое семейство).
 
 ---
 
