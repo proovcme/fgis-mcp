@@ -367,6 +367,30 @@ def test_batch_read_detail_levels(config, monkeypatch, mock_network_records):
     assert "editions" in r_f
 
 
+def test_batch_read_preserves_publication_miss_diagnostics(config, monkeypatch, mock_network_records):
+    svc = Service(config)
+    monkeypatch.setattr(svc.network, "get_json", _make_mock_get_json(mock_network_records))
+
+    res = svc.batch_read_norms(
+        [
+            {
+                "input_id": "bath_wrong_publication",
+                "code": "17-01-001-01",
+                "family": "ГЭСН",
+                "document_guid": "guid-later-delta",
+            }
+        ],
+        detail_level="compact",
+    )
+
+    item = res["results"][0]
+    assert item["match_status"] == "not_found"
+    assert item["filter_reason"] == "not_found_in_requested_publication"
+    assert item["requested_filters"]["document_guid"] == "guid-later-delta"
+    assert item["available_publications_total"] == 1
+    assert item["available_publications"][0]["document_guid"] == "guid-bath"
+
+
 def test_batch_read_limit_validation(config):
     svc = Service(config)
 
