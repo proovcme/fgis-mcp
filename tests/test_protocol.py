@@ -34,6 +34,7 @@ def test_stdio_discovery_and_offline_call(tmp_path, mode):
                 "fgis_compare_norms",
                 "fgis_extract_coefficients",
                 "fgis_price_history",
+                "fgis_resolve_resource_price",
                 "fgis_verify_dataset",
                 "fgis_import_manual_file",
                 "fgis_opendata_list",

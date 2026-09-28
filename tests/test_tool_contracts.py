@@ -202,6 +202,13 @@ def test_11_download_and_price_history_contract_descriptions(config):
     assert "fsbc" in query_desc
     assert "fgis_price_history" in query_desc
 
+    resolve_tool = tools["fgis_resolve_resource_price"]
+    assert {"dataset_id", "code", "zone_id", "period_id"}.issubset(
+        resolve_tool.input_schema.get("properties", {})
+    )
+    assert "price_base" in resolve_tool.description
+    assert "current price" in resolve_tool.description
+
 
 def test_12_documentation_no_invalid_download_parameters():
     from pathlib import Path

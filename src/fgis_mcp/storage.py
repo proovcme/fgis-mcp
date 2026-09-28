@@ -1485,6 +1485,25 @@ class Dataset:
             "records": base_records + records,
         }
 
+    def resolve_resource_price(self, code: str, zone_id: int, period_id: int):
+        """Resolve one quarterly resource price with exact territorial and temporal context."""
+        from .price_resolution import resolve_resource_price
+
+        result = self.query(
+            kind="prices",
+            code=code,
+            zone_id=zone_id,
+            period_id=period_id,
+            limit=100,
+        )
+        return resolve_resource_price(
+            result["items"],
+            code=code,
+            zone_id=zone_id,
+            period_id=period_id,
+            dataset_id=self.id,
+        )
+
     def export(self, formats=("jsonl",), include_incomplete: bool = False):
         if any(f not in {"jsonl", "parquet"} for f in formats):
             raise ValueError("Formats: jsonl, parquet (SQLite is always present)")

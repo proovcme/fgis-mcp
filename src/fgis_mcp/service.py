@@ -1405,6 +1405,9 @@ class Service:
         data = Dataset(self.config.root, dataset_id)
         return data.price_history(code, zone_id, include_incomplete=include_incomplete)
 
+    def resolve_resource_price(self, code: str, zone_id: int, period_id: int, dataset_id: str):
+        return Dataset(self.config.root, dataset_id).resolve_resource_price(code, zone_id, period_id)
+
     def verify_dataset(self, dataset_id: str):
         data = Dataset(self.config.root, dataset_id)
         manifest_path = data.path / "manifest.json"

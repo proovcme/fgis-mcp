@@ -46,7 +46,8 @@ def create_server(config):
             "11. If evidence is insufficient, explicitly state the limitation (UNRESOLVED_CONDITION or UNSUPPORTED_BY_FGIS_MCP). "
             "12. For coefficients: fgis_extract_coefficients requires a known document_guid and/or table_index; it does not accept a text query argument. "
             "13. Region -> zone -> period IDs come from fgis_catalog. Downloads return durable job IDs; poll fgis_job_status. A complete job means requested tasks succeeded, not that the whole FSNB is complete. "
-            "14. Every tool result may contain error_code. Treat NETWORK_ERROR as an unavailable source, not as not_found, and retry only when retryable=true."
+            "14. Every tool result may contain error_code. Treat NETWORK_ERROR as an unavailable source, not as not_found, and retry only when retryable=true. "
+            "15. For estimate-ready resource prices, use fgis_resolve_resource_price. A raw price_base is not a current price."
         ),
     )
     read = ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=True)
@@ -414,6 +415,21 @@ def create_server(config):
         unimported periods/zones can be downloaded via fgis_start_download.
         """
         return service.price_history(code, dataset_id, zone_id, include_incomplete=include_incomplete)
+
+    @safe_tool(annotations=local)
+    def fgis_resolve_resource_price(
+        dataset_id: str,
+        code: str,
+        zone_id: int,
+        period_id: int,
+    ) -> dict:
+        """Resolve an estimate-ready price for one exact resource code, price zone and period.
+        Returns a published current price when present; otherwise multiplies the split form's
+        published price_base by its published homogeneous-resource index. It never treats
+        price_base alone as a current price and never guesses a missing index, zone or period.
+        Conflicting duplicate records fail closed. The result preserves group and provenance evidence.
+        """
+        return service.resolve_resource_price(code, zone_id, period_id, dataset_id)
 
     @safe_tool(annotations=local)
     def fgis_verify_dataset(dataset_id: str) -> dict:
