@@ -3,7 +3,7 @@ import functools
 from mcp.server import MCPServer
 from mcp.types import ToolAnnotations
 
-from . import __version__, catalogs, jobs
+from . import __version__, catalogs, jobs, ksr
 from .errors import FgisError
 from .service import Service
 from .storage import Dataset, dump
@@ -47,7 +47,9 @@ def create_server(config):
             "12. For coefficients: fgis_extract_coefficients requires a known document_guid and/or table_index; it does not accept a text query argument. "
             "13. Region -> zone -> period IDs come from fgis_catalog. Downloads return durable job IDs; poll fgis_job_status. A complete job means requested tasks succeeded, not that the whole FSNB is complete. "
             "14. Every tool result may contain error_code. Treat NETWORK_ERROR as an unavailable source, not as not_found, and retry only when retryable=true. "
-            "15. For estimate-ready resource prices, use fgis_resolve_resource_price. A raw price_base is not a current price."
+            "15. For estimate-ready resource prices, use fgis_resolve_resource_price. A raw price_base is not a current price. "
+            "16. For KSR resources, use fgis_search_ksr or fgis_read_ksr. Keep each code as published. "
+            "An exact KSR result identifies a catalogue entry. A price or an estimating norm requires separate evidence."
         ),
     )
     read = ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=True)
@@ -102,6 +104,25 @@ def create_server(config):
     def fgis_catalog(kind: str = "regions", parent_id: int | None = None) -> dict:
         """List price regions; zones with region parent_id; periods with zone parent_id."""
         return service.catalog(kind, parent_id)
+
+    @safe_tool(annotations=read)
+    def fgis_search_ksr(query: str, limit: int = 20, offset: int = 0) -> dict:
+        """Find KSR construction resource candidates online by name or code fragment.
+
+        Returns published codes, names, units, catalogue links and request evidence. The catalogue may
+        return full codes and shorter resource ciphers as separate entries. Results and pagination
+        cover only the suggestions returned by the portal. Empty results cannot prove absence in KSR.
+        """
+        return ksr.lookup(service.network, query, limit=limit, offset=offset)
+
+    @safe_tool(annotations=read)
+    def fgis_read_ksr(code: str, limit: int = 20, offset: int = 0) -> dict:
+        """Read public KSR entries whose published code matches the input exactly.
+
+        Returns exact, ambiguous, or not_found_in_search. Use pagination to inspect multiple
+        exact matches. A match confirms a catalogue entry and does not establish a price.
+        """
+        return ksr.lookup(service.network, code, exact=True, limit=limit, offset=offset)
 
     @safe_tool(annotations=read)
     def fgis_search_norms(
